@@ -2,8 +2,8 @@
  * Hidecare monitor-server client.
  *
  * Registers the device on the Hidecare server, forwards motion state changes
- * and periodic heartbeats to POST /events, and optionally checks
- * GET /firmware/latest for OTA updates. All network work runs in its own
+ * and periodic heartbeats to POST /events. OTA goes through the built-in
+ * HttpsOtaService, which app_main points at <server>/firmware/latest. All network work runs in its own
  * FreeRTOS task; notify_motion() is safe to call from the frontend loop.
  *
  * SPDX-License-Identifier: GPL-3.0-only

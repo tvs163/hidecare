@@ -19,13 +19,10 @@
 #include <esp_mac.h>
 #include <esp_netif.h>
 #include <esp_netif_sntp.h>
-#include <esp_ota_ops.h>
-#include <esp_system.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
-#include <mbedtls/sha256.h>
 #include <sdkconfig.h>
 
 #include "frontend_firmware_version.h"
@@ -164,142 +161,12 @@ void enqueue(EventKind kind) {
   }
 }
 
-#if CONFIG_HIDECARE_OTA_ENABLED
-// Minimal extraction of a string field from a flat JSON object.
-bool json_field(const std::string &json, const char *key, std::string *out) {
-  const std::string needle = std::string("\"") + key + "\"";
-  size_t pos = json.find(needle);
-  if (pos == std::string::npos) return false;
-  pos = json.find(':', pos + needle.size());
-  if (pos == std::string::npos) return false;
-  pos = json.find('"', pos);
-  if (pos == std::string::npos) return false;
-  const size_t end = json.find('"', pos + 1);
-  if (end == std::string::npos) return false;
-  *out = json.substr(pos + 1, end - pos - 1);
-  return true;
-}
-
-// Compare dotted numeric versions ("3.1.0" vs "3.1.2"); non-digits are ignored.
-int compare_versions(const std::string &a, const std::string &b) {
-  size_t i = 0, j = 0;
-  while (i < a.size() || j < b.size()) {
-    long x = 0, y = 0;
-    while (i < a.size() && a[i] != '.') { if (isdigit(static_cast<unsigned char>(a[i]))) x = x * 10 + (a[i] - '0'); ++i; }
-    while (j < b.size() && b[j] != '.') { if (isdigit(static_cast<unsigned char>(b[j]))) y = y * 10 + (b[j] - '0'); ++j; }
-    if (x != y) return x < y ? -1 : 1;
-    ++i; ++j;
-  }
-  return 0;
-}
-
-std::string url_encode(const std::string &in) {
-  static const char *hex = "0123456789ABCDEF";
-  std::string out;
-  for (unsigned char c : in) {
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += static_cast<char>(c);
-    else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
-  }
-  return out;
-}
-
-/** Download url into the next OTA slot, verify sha256 (hex), then switch boot partition. */
-bool apply_update(const std::string &image_url, const std::string &sha256_hex) {
-  const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
-  if (target == nullptr || sha256_hex.size() != 64) {
-    ESP_LOGE(TAG, "ota: no target partition or bad sha256");
-    return false;
-  }
-  esp_http_client_config_t cfg{};
-  cfg.url = image_url.c_str();
-  cfg.timeout_ms = 30000;
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
-  cfg.buffer_size = 2048;
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
-  if (client == nullptr) return false;
-  bool ok = false;
-  esp_ota_handle_t ota = 0;
-  bool ota_open = false;
-  mbedtls_sha256_context sha;
-  mbedtls_sha256_init(&sha);
-  mbedtls_sha256_starts(&sha, 0);
-  if (esp_http_client_open(client, 0) == ESP_OK && esp_http_client_fetch_headers(client) >= 0 &&
-      esp_http_client_get_status_code(client) == 200 &&
-      esp_ota_begin(target, OTA_SIZE_UNKNOWN, &ota) == ESP_OK) {
-    ota_open = true;
-    static char buf[2048];
-    int n;
-    bool write_ok = true;
-    while ((n = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
-      mbedtls_sha256_update(&sha, reinterpret_cast<unsigned char *>(buf), n);
-      if (esp_ota_write(ota, buf, n) != ESP_OK) { write_ok = false; break; }
-    }
-    if (write_ok && n == 0 && esp_http_client_is_complete_data_received(client)) {
-      unsigned char digest[32];
-      mbedtls_sha256_finish(&sha, digest);
-      char hex[65];
-      for (int k = 0; k < 32; ++k) snprintf(hex + 2 * k, 3, "%02x", digest[k]);
-      if (strcasecmp(hex, sha256_hex.c_str()) != 0) {
-        ESP_LOGE(TAG, "ota: sha256 mismatch");
-      } else if (esp_ota_end(ota) == ESP_OK) {
-        ota_open = false;
-        ok = esp_ota_set_boot_partition(target) == ESP_OK;
-      }
-    }
-  }
-  if (ota_open) esp_ota_abort(ota);
-  mbedtls_sha256_free(&sha);
-  esp_http_client_cleanup(client);
-  return ok;
-}
-
-void check_for_update() {
-  const std::string current = espectre::frontend_firmware_version();
-  const std::string target = url("/firmware/latest?device_code=") + url_encode(g_device_code) +
-                             "&version=" + url_encode(current);
-  esp_http_client_config_t cfg{};
-  cfg.url = target.c_str();
-  cfg.timeout_ms = kHttpTimeoutMs;
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
-  if (client == nullptr) return;
-  std::string body;
-  int status = -1;
-  if (esp_http_client_open(client, 0) == ESP_OK) {
-    esp_http_client_fetch_headers(client);
-    status = esp_http_client_get_status_code(client);
-    char buf[256];
-    int n;
-    while ((n = esp_http_client_read(client, buf, sizeof(buf))) > 0 && body.size() < 2048) body.append(buf, n);
-  }
-  esp_http_client_cleanup(client);
-  if (status == 204) { ESP_LOGI(TAG, "ota: up to date (%s)", current.c_str()); return; }
-  std::string version, image_url, sha256;
-  if (status != 200 || !json_field(body, "version", &version) || !json_field(body, "url", &image_url) ||
-      !json_field(body, "sha256", &sha256)) {
-    ESP_LOGW(TAG, "ota: check failed, status=%d", status);
-    return;
-  }
-  if (compare_versions(version, current) <= 0) return;
-  if (image_url.rfind("https://", 0) != 0) { ESP_LOGW(TAG, "ota: refusing non-https url"); return; }
-  ESP_LOGI(TAG, "ota: updating %s -> %s", current.c_str(), version.c_str());
-  if (apply_update(image_url, sha256)) {
-    ESP_LOGI(TAG, "ota: applied, rebooting");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    esp_restart();
-  }
-  ESP_LOGE(TAG, "ota: update failed");
-}
-#endif
 
 void client_task(void *) {
   bool registered = false;
   uint32_t backoff = kRegisterBackoffMinMs;
   uint32_t next_register = 0;
   uint32_t next_heartbeat = now_ms() + CONFIG_HIDECARE_HEARTBEAT_SEC * 1000U;
-#if CONFIG_HIDECARE_OTA_ENABLED
-  uint32_t next_ota = now_ms() + 60 * 1000;  // first check a minute after boot
-#endif
   bool sntp_started = false;
   bool pending_valid = false;
   QueuedEvent pending{};
@@ -331,12 +198,6 @@ void client_task(void *) {
       next_heartbeat = now + CONFIG_HIDECARE_HEARTBEAT_SEC * 1000U;
       enqueue(EventKind::HEARTBEAT);
     }
-#if CONFIG_HIDECARE_OTA_ENABLED
-    if (static_cast<int32_t>(now - next_ota) >= 0) {
-      next_ota = now + CONFIG_HIDECARE_OTA_INTERVAL_SEC * 1000U;
-      check_for_update();
-    }
-#endif
     if (!pending_valid && xQueueReceive(g_queue, &pending, pdMS_TO_TICKS(1000)) == pdTRUE) {
       if (!time_valid(pending.timestamp)) pending.timestamp = 0;
       pending_valid = true;

@@ -84,6 +84,7 @@ espectre::ImprovSerialService *g_improv_serial = nullptr;
 espectre::MdnsDiscoveryService *g_mdns_discovery = nullptr;
 espectre::MdnsBootstrapResponder *g_mdns_bootstrap_responder = nullptr;
 espectre::StandaloneWifiService g_wifi_manager;
+espectre::HttpsOtaService *g_ota_service = nullptr;
 espectre::WifiProvisioningService g_wifi_provisioning(&g_wifi_manager);
 
 const char *native_capabilities() {
@@ -283,6 +284,17 @@ void espectre_loop_task(void *arg) {
     if (g_mdns_bootstrap_responder != nullptr) {
       g_mdns_bootstrap_responder->loop();
     }
+#if CONFIG_HIDECARE_OTA_ENABLED
+    // Hidecare: periodic update check through the built-in OTA service, which
+    // only talks to CONFIG_HIDECARE_SERVER_URL/firmware/latest.
+    static uint32_t next_ota_ms = 60U * 1000U;
+    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (g_ota_service != nullptr && static_cast<int32_t>(now_ms - next_ota_ms) >= 0 &&
+        improv_network_connected()) {
+      next_ota_ms = now_ms + CONFIG_HIDECARE_OTA_INTERVAL_SEC * 1000U;
+      (void) g_ota_service->start_update(espectre::frontend_firmware_version());
+    }
+#endif
     if (g_frontend != nullptr) {
       g_frontend->hold_pending_traffic_restart(g_wifi_manager.has_deferred_radio_work());
       g_frontend->loop();
@@ -376,6 +388,8 @@ extern "C" void app_main() {
   static espectre::MdnsBootstrapResponder mdns_bootstrap_responder;
   static espectre::EspIdfPeerDiscoveryService peer_discovery;
   static espectre::HttpsOtaService ota_service("native", CONFIG_IDF_TARGET, kOtaReleaseChannel);
+  ota_service.set_device_code(hidecare::device_code());
+  g_ota_service = &ota_service;
   static espectre::NativeFrontend frontend(&mqtt_transport, &ota_service, &direct_service);
   const espectre::EspectreDeviceConfig device_config = make_device_config();
   const std::string device_id = espectre::format_espectre_device_id(device_config.device_id);

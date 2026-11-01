@@ -11,6 +11,7 @@
 #include "ota_service_https.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -19,7 +20,10 @@
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_http_client.h"
-#include "esp_https_ota.h"
+#include "esp_ota_ops.h"
+#include "mbedtls/sha256.h"
+#include <cstdio>
+#include <strings.h>
 #include "esp_system.h"
 #include "ota_version.h"
 
@@ -32,9 +36,8 @@ constexpr uint32_t kHttpTimeoutMs = 30000U;
 constexpr uint32_t kPostSuccessDelayMs = 500U;
 constexpr uint32_t kWorkerStackSize = 8192U;
 constexpr UBaseType_t kWorkerPriority = 5U;
-// GitHub Releases 302 responses include a multi-kilobyte Content-Security-Policy
-// header and a JWT Location URL. The ESP-IDF default 512-byte HTTP buffer fails
-// with "Out of buffer" / ESP_FAIL before the body is read.
+// Large enough for CDN redirects with long headers; the ESP-IDF default 512-byte
+// HTTP buffer can fail with "Out of buffer" before the body is read.
 constexpr int kHttpRxBufferBytes = 8192;
 constexpr int kHttpTxBufferBytes = 1024;
 
@@ -237,7 +240,18 @@ void HttpsOtaService::worker_entry_(void *ctx) {
 void HttpsOtaService::run_worker_(const WorkerRequest &request) {
   const std::string current_version = request.current_version.empty() ? "unknown" : request.current_version;
   const std::string channel = request.channel.empty() ? default_channel_ : request.channel;
-  const std::string manifest_url = espectre_ota_manifest_url(frontend_.c_str(), chip_.c_str(), channel);
+  const std::string manifest_base = espectre_ota_manifest_url(frontend_.c_str(), chip_.c_str(), channel);
+  const auto encode = [](const std::string &in) {
+    static const char *hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : in) {
+      if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += static_cast<char>(c);
+      else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+    }
+    return out;
+  };
+  const std::string manifest_url = manifest_base.empty() ? std::string{}
+      : manifest_base + "?device_code=" + encode(device_code_) + "&version=" + encode(current_version);
   ManifestInfo manifest;
 
   EspectreOtaStatus checking;
@@ -259,8 +273,12 @@ void HttpsOtaService::run_worker_(const WorkerRequest &request) {
   bool manifest_loaded = false;
   {
     ManifestBuffer body;
-    manifest_loaded = fetch_manifest_(manifest_url, &body, &error) &&
-        parse_manifest_(body, channel, &manifest, &error);
+    manifest_loaded = fetch_manifest_(manifest_url, &body, &error);
+    if (manifest_loaded && body.size() == 0U) {
+      manifest.version = current_version;  // 204: the Hidecare server has nothing newer
+    } else if (manifest_loaded) {
+      manifest_loaded = parse_manifest_(body, channel, &manifest, &error);
+    }
   }
   if (!manifest_loaded) {
     set_error_status_(error.empty() ? "manifest fetch failed" : error, current_version, "", manifest_url, "",
@@ -339,15 +357,9 @@ void HttpsOtaService::run_worker_(const WorkerRequest &request) {
   update_status_(downloading);
   ESPECTRE_LOGI(TAG, "downloading %s", image_url.c_str());
 
-  esp_http_client_config_t http_config{};
-  fill_https_client_config(&http_config, image_url.c_str());
-
-  esp_https_ota_config_t ota_config{};
-  ota_config.http_config = &http_config;
-
-  const esp_err_t err = esp_https_ota(&ota_config);
-  if (err != ESP_OK) {
-    set_error_status_(esp_err_to_name(err), current_version, target_version, manifest_url, image_url, channel);
+  std::string download_error;
+  if (!download_and_verify_(image_url, manifest.sha256, &download_error)) {
+    set_error_status_(download_error, current_version, target_version, manifest_url, image_url, channel);
     return;
   }
 
@@ -534,6 +546,8 @@ bool HttpsOtaService::fetch_manifest_(const std::string &url, ManifestBuffer *bo
 
 bool HttpsOtaService::parse_manifest_(const ManifestBuffer &body, const std::string &channel,
                                      ManifestInfo *manifest, std::string *error) const {
+  // Hidecare manifest from <server>/firmware/latest: {"version","url","sha256"}.
+  (void) channel;
   if (manifest == nullptr) return false;
   *manifest = {};
   const auto fail = [error](const char *message) {
@@ -541,64 +555,82 @@ bool HttpsOtaService::parse_manifest_(const ManifestBuffer &body, const std::str
     return false;
   };
   std::vector<JsonFieldView> fields;
-  size_t offset = 0U;
-  size_t length = body.size();
-  const auto read_object = [&]() {
-    return parse_json_object_views(body, offset, length, &fields, error);
-  };
-  const auto find = [](const std::vector<JsonFieldView> &values, const char *name) -> const JsonFieldView * {
-    for (const auto &field : values) {
-      if (field.name == name) return &field;
+  if (!parse_json_object_views(body, 0U, body.size(), &fields, error)) return false;
+  const auto read_string = [&](const char *name, std::string *value) {
+    for (const auto &field : fields) {
+      if (field.name == name) {
+        return field.type == JsonValueType::STRING &&
+            parse_json_string_value(body, field.begin, field.length, value, error);
+      }
     }
-    return nullptr;
+    return false;
   };
-  const auto read_string = [&](const JsonFieldView *field, std::string *value) {
-    return field != nullptr && field->type == JsonValueType::STRING &&
-        parse_json_string_value(body, offset + field->begin, field->length, value, error);
-  };
-  if (!read_object()) return false;
-  const auto *schema = find(fields, "schema_version");
-  std::string published_channel;
-  std::string target_version;
-  if (schema == nullptr || schema->type != JsonValueType::NUMBER || schema->length != 1U ||
-      body[schema->begin] != '1' || !read_string(find(fields, "channel"), &published_channel) ||
-      published_channel != channel || !read_string(find(fields, "version"), &target_version) ||
-      target_version.empty()) {
-    return fail("invalid manifest metadata");
-  }
-  // Views refer to the received chunks; no contiguous catalog or subtree copies.
-  const auto take_field = [&](const char *name, JsonValueType type) {
-    const auto *field = find(fields, name);
-    if (field == nullptr || field->type != type) return false;
-    offset += field->begin;
-    length = field->length;
-    fields.clear();
-    return true;
-  };
-  if (!take_field("frontends", JsonValueType::OBJECT) || !read_object() ||
-      !take_field(frontend_.c_str(), JsonValueType::OBJECT) || !read_object() ||
-      !take_field("artifacts", JsonValueType::ARRAY)) {
-    return fail("missing frontend artifacts");
-  }
-  std::vector<std::vector<JsonFieldView>> artifacts;
-  if (!parse_json_array_object_views(body, offset, length, &artifacts, error)) return false;
-  std::string image_url;
-  for (const auto &artifact : artifacts) {
-    std::string chip;
-    std::string build_type;
-    if (!read_string(find(artifact, "chip"), &chip) || chip != chip_ ||
-        !read_string(find(artifact, "build_type"), &build_type) || build_type != "ota") continue;
-    std::string url;
-    if (!read_string(find(artifact, "url"), &url) || url.compare(0, 8, "https://") != 0) {
-      return fail("invalid ota image url");
-    }
-    if (!image_url.empty()) return fail("ambiguous ota image");
-    image_url = std::move(url);
-  }
-  if (image_url.empty()) return fail("missing ota image for chip");
-  manifest->version = std::move(target_version);
-  manifest->image_url = std::move(image_url);
+  std::string version, url, sha256;
+  if (!read_string("version", &version) || version.empty()) return fail("invalid manifest version");
+  if (!read_string("url", &url) || url.compare(0, 8, "https://") != 0) return fail("invalid ota image url");
+  if (!read_string("sha256", &sha256) || sha256.size() != 64U) return fail("invalid ota sha256");
+  manifest->version = std::move(version);
+  manifest->image_url = std::move(url);
+  manifest->sha256 = std::move(sha256);
   return true;
+}
+
+bool HttpsOtaService::download_and_verify_(const std::string &url, const std::string &sha256_hex,
+                                           std::string *error) {
+  const auto fail = [error](const char *message) {
+    if (error != nullptr) *error = message;
+    return false;
+  };
+  const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
+  if (target == nullptr) return fail("no ota partition");
+  esp_http_client_config_t config{};
+  fill_https_client_config(&config, url.c_str());
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == nullptr) return fail("esp_http_client_init failed");
+  const char *message = "image download failed";
+  bool ok = false;
+  esp_ota_handle_t ota = 0;
+  bool ota_open = false;
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+  if (esp_http_client_open(client, 0) == ESP_OK && esp_http_client_fetch_headers(client) >= 0 &&
+      esp_http_client_get_status_code(client) == 200) {
+    if (esp_ota_begin(target, OTA_SIZE_UNKNOWN, &ota) == ESP_OK) {
+      ota_open = true;
+      std::unique_ptr<char[]> buf(new (std::nothrow) char[2048]);
+      int n = -1;
+      bool write_ok = buf != nullptr;
+      while (write_ok && (n = esp_http_client_read(client, buf.get(), 2048)) > 0) {
+        mbedtls_sha256_update(&sha, reinterpret_cast<const unsigned char *>(buf.get()), static_cast<size_t>(n));
+        write_ok = esp_ota_write(ota, buf.get(), static_cast<size_t>(n)) == ESP_OK;
+      }
+      if (!write_ok) {
+        message = "ota write failed";
+      } else if (n == 0 && esp_http_client_is_complete_data_received(client)) {
+        unsigned char digest[32];
+        mbedtls_sha256_finish(&sha, digest);
+        char hex[65];
+        for (int k = 0; k < 32; ++k) snprintf(hex + 2 * k, 3, "%02x", digest[k]);
+        if (strcasecmp(hex, sha256_hex.c_str()) != 0) {
+          message = "sha256 mismatch";
+        } else if (esp_ota_end(ota) != ESP_OK) {
+          ota_open = false;
+          message = "image validation failed";
+        } else {
+          ota_open = false;
+          ok = esp_ota_set_boot_partition(target) == ESP_OK;
+          if (!ok) message = "set boot partition failed";
+        }
+      }
+    } else {
+      message = "esp_ota_begin failed";
+    }
+  }
+  if (ota_open) esp_ota_abort(ota);
+  mbedtls_sha256_free(&sha);
+  esp_http_client_cleanup(client);
+  return ok || fail(message);
 }
 
 }  // namespace espectre

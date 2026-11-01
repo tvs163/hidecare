@@ -17,7 +17,7 @@ Hidecare — форк ESPectre. Используется **нативная пр
 | `CONFIG_HIDECARE_SERVER_URL` | `https://monitor.aidatastock.ru` | Адрес сервера, единственное место |
 | `CONFIG_HIDECARE_DEVICE_CODE` | пусто | Пусто: `HC-` + последние 6 hex MAC (например `HC-A1B2C3`). Иначе используется заданный код |
 | `CONFIG_HIDECARE_HEARTBEAT_SEC` | `300` | Интервал heartbeat |
-| `CONFIG_HIDECARE_OTA_ENABLED` | `n` | Проверка обновлений на сервере Hidecare |
+| `CONFIG_HIDECARE_OTA_ENABLED` | `n` | Автоматическая проверка обновлений на сервере Hidecare (ручная работает всегда) |
 | `CONFIG_HIDECARE_OTA_INTERVAL_SEC` | `21600` (6 ч) | Интервал проверки обновлений |
 | `CONFIG_HIDECARE_SETUP_URL` | `https://t.me/hidecarebot` | Ссылка, которую Improv показывает после настройки Wi-Fi (раньше была espectre.dev) |
 
@@ -27,7 +27,7 @@ Hidecare — форк ESPectre. Используется **нативная пр
 
 1. После подключения к Wi-Fi: `POST /devices/register` `{"device_code","fw_version","mac"}` → `200 {"ok":true,"bound":bool}`. Если не удалось, повтор с backoff 5 с → 10 с → … → 10 мин. После каждого переподключения Wi-Fi регистрация повторяется.
 2. События: `POST /events` `{"device_code","event","timestamp"}`, где `event` — `motion`, `no_motion` (смена состояния детектора) или `heartbeat` (раз в 5 минут). `timestamp` — ISO 8601 UTC по SNTP (`pool.ntp.org`); пока время не синхронизировано, поле не передаётся и сервер ставит время приёма. Комната не передаётся, сервер берёт её из привязки. Если сервер недоступен, событие повторяется каждые 5 с; очередь на 16 событий, при переполнении выбрасывается самое старое.
-3. OTA (если включено): `GET /firmware/latest?device_code=..&version=..` → `204` (обновлений нет) или `200 {"version","url","sha256"}`. Если версия новее, образ по `https://` скачивается во второй OTA-раздел, сверяется SHA-256, и только после этого раздел становится загрузочным, затем перезагрузка.
+3. OTA: см. раздел «OTA» ниже.
 
 ## Что установить
 
@@ -86,18 +86,42 @@ Captive portal (точка доступа с веб-страницей) в ESPec
 
 ## OTA
 
-1. Собрать новую версию (версия берётся из `frontend_firmware_version()`), файл `build-s3/espectre-native.bin`.
-2. Выложить `.bin` по HTTPS, посчитать `sha256sum espectre-native.bin`.
-3. На сервере записать `/opt/monitor/firmware/latest.json`:
-   ```json
-   {"version": "3.1.1", "url": "https://monitor.aidatastock.ru/fw/hidecare-3.1.1-esp32s3.bin", "sha256": "<64 hex>"}
+Единственный источник обновлений — сервер Hidecare: `CONFIG_HIDECARE_SERVER_URL` + `/firmware/latest`. Встроенный OTA-сервис ESPectre (`HttpsOtaService`) перенаправлен туда же: кнопки и команды ручной проверки/обновления в Device settings, Direct HTTP и MQTT ходят на сервер Hidecare, а не на GitHub. Канал (`release`/`preview`/`develop`) больше не влияет на адрес.
+
+Порядок обновления на устройстве: запрос `GET /firmware/latest?device_code=..&version=..` → `204` (ничего нового) или `{"version","url","sha256"}` → если версия новее и `url` начинается с `https://`, образ пишется во второй OTA-раздел с подсчётом SHA-256 → при совпадении хеша раздел становится загрузочным → перезагрузка. При несовпадении образ отбрасывается.
+
+С `CONFIG_HIDECARE_OTA_ENABLED=y` устройство само запускает обновление через минуту после старта и далее раз в `CONFIG_HIDECARE_OTA_INTERVAL_SEC` (6 часов). Без флага обновление ставится только вручную из Device settings.
+
+### Как выложить новую версию
+
+Файлы раздаёт Caddy: `https://monitor.aidatastock.ru/firmware/files/<имя>.bin` из каталога `/opt/monitor/firmware/files/` на сервере (листинга каталога нет). Манифест `/opt/monitor/firmware/latest.json` лежит вне раздаваемого каталога.
+
+1. Поднять версию прошивки и собрать (см. «Сборка»). Образ для OTA — `build-s3/espectre-native.bin`.
+2. Дать файлу имя с версией и чипом и посчитать хеш:
+   ```bash
+   cp build-s3/espectre-native.bin hidecare-3.1.1-esp32s3.bin
+   sha256sum hidecare-3.1.1-esp32s3.bin
    ```
-4. Устройства с `CONFIG_HIDECARE_OTA_ENABLED=y` проверят обновление через минуту после старта и далее раз в 6 часов.
+3. Загрузить на сервер:
+   ```bash
+   scp -i ~/.ssh/zetalink_ed25519 hidecare-3.1.1-esp32s3.bin root@82.114.228.137:/opt/monitor/firmware/files/
+   curl -sI https://monitor.aidatastock.ru/firmware/files/hidecare-3.1.1-esp32s3.bin   # 200
+   ```
+4. Записать манифест на сервере (`sha256` — 64 hex из шага 2):
+   ```bash
+   ssh -i ~/.ssh/zetalink_ed25519 root@82.114.228.137 'cat > /opt/monitor/firmware/latest.json' <<'JSON'
+   {"version": "3.1.1",
+    "url": "https://monitor.aidatastock.ru/firmware/files/hidecare-3.1.1-esp32s3.bin",
+    "sha256": "<64 hex>"}
+   JSON
+   curl -s "https://monitor.aidatastock.ru/firmware/latest?version=3.1.0"   # отдаёт манифест
+   ```
+5. Откатить выпуск: удалить `latest.json` — сервер снова отвечает 204.
 
 Образ должен быть собран под тот же чип. Сервер пока не различает чипы, поэтому при нескольких моделях плат нужен отдельный манифест на чип.
 
 ## Ограничения
 
 - Запросы к серверу без ключа устройства: кто знает код, может слать события от его имени.
-- Встроенный OTA ESPectre (Device settings) по-прежнему смотрит на релизы upstream на GitHub; им пользоваться не нужно, иначе на плату встанет прошивка ESPectre без Hidecare.
+- Device settings открывается со страницы espectre.dev (в прошивке разрешены её CORS-origins); сама прошивка на espectre.dev и GitHub не обращается.
 - Captive portal не реализован, только Improv Serial по USB.

@@ -31,13 +31,14 @@ menu "Hidecare"
         default 300
 
     config HIDECARE_OTA_ENABLED
-        bool "Check the Hidecare server for firmware updates"
+        bool "Automatically check the Hidecare server for firmware updates"
         depends on HIDECARE_ENABLED
         default n
         help
-            GET <server>/firmware/latest?device_code=..&version=.. must answer
-            {"version","url","sha256"} or 204. A newer image is downloaded,
-            its SHA-256 is verified, and only then it becomes the boot image.
+            Periodically run the built-in OTA service, which always uses
+            GET <server>/firmware/latest?device_code=..&version=.. and expects
+            {"version","url","sha256"} or 204. Manual updates from Device
+            settings use the same endpoint even when this is off.
 
     config HIDECARE_OTA_INTERVAL_SEC
         int "Firmware update check interval (s)"
