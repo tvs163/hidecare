@@ -1,0 +1,48 @@
+menu "Hidecare"
+
+    config HIDECARE_ENABLED
+        bool "Enable Hidecare monitor-server client"
+        default y
+        help
+            Register the device on the Hidecare server and send motion,
+            no_motion and heartbeat events to it.
+
+    config HIDECARE_SERVER_URL
+        string "Hidecare server base URL (no trailing slash)"
+        depends on HIDECARE_ENABLED
+        default "https://monitor.aidatastock.ru"
+
+    config HIDECARE_DEVICE_CODE
+        string "Device code override"
+        depends on HIDECARE_ENABLED
+        default ""
+        help
+            Leave empty to use "HC-" plus the last 6 hex digits of the
+            station MAC address, for example HC-A1B2C3.
+
+    config HIDECARE_SETUP_URL
+        string "URL shown by Improv Serial after Wi-Fi setup"
+        default "https://t.me/hidecarebot"
+
+    config HIDECARE_HEARTBEAT_SEC
+        int "Heartbeat interval (s)"
+        depends on HIDECARE_ENABLED
+        range 30 86400
+        default 300
+
+    config HIDECARE_OTA_ENABLED
+        bool "Check the Hidecare server for firmware updates"
+        depends on HIDECARE_ENABLED
+        default n
+        help
+            GET <server>/firmware/latest?device_code=..&version=.. must answer
+            {"version","url","sha256"} or 204. A newer image is downloaded,
+            its SHA-256 is verified, and only then it becomes the boot image.
+
+    config HIDECARE_OTA_INTERVAL_SEC
+        int "Firmware update check interval (s)"
+        depends on HIDECARE_OTA_ENABLED
+        range 300 604800
+        default 21600
+
+endmenu

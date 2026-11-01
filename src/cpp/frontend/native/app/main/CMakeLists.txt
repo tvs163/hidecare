@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "app_main.cpp"
+        "hidecare_client.cpp"
     INCLUDE_DIRS
         "."
         "../../espectre"

@@ -233,6 +233,7 @@ void NativeFrontend::drain_pending_runtime_events_() {
   RuntimeSnapshot snapshot;
   while (runtime_events_.take_motion_state(snapshot)) {
     mqtt_frontend_->home_assistant().publish_motion(snapshot.motion_state);
+    if (motion_listener_) motion_listener_(snapshot.motion_state == MotionState::MOTION);
   }
   if (runtime_events_.take_live_telemetry(snapshot)) {
     const uint32_t now = now_ms_();

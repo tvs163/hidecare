@@ -26,6 +26,7 @@
 #include "improv_serial_service.h"
 #include "ota_service_https.h"
 #include "primary_console.h"
+#include "hidecare_client.h"
 
 static const char *TAG = "espectre.native.app";
 
@@ -145,7 +146,8 @@ std::string improv_device_url() {
   if (!g_wifi_manager.get_info(&wifi_info) || !wifi_info.connected || wifi_info.ip_address[0] == '\0') {
     return {};
   }
-  return std::string("https://espectre.dev/tools/device-settings/?target=") + wifi_info.ip_address;
+  // Hidecare: send the user to the bot instead of espectre.dev Device settings.
+  return std::string(CONFIG_HIDECARE_SETUP_URL);
 }
 
 bool improv_network_connected() {
@@ -156,7 +158,7 @@ bool improv_network_connected() {
 
 [[gnu::noinline]] bool setup_native_improv_serial(const std::string &display_name) {
   espectre::ImprovSerialServiceConfig improv_config;
-  improv_config.firmware_name = "ESPectre Native";
+  improv_config.firmware_name = "Hidecare";
   improv_config.firmware_version = espectre::frontend_firmware_version();
   improv_config.hardware_variant = CONFIG_IDF_TARGET;
   improv_config.device_name = display_name;
@@ -409,6 +411,7 @@ extern "C" void app_main() {
   frontend.set_wifi_scan_callback(
       [](std::string *message) { return g_wifi_provisioning.request_access_point_scan(message); });
   frontend.set_device_config_change_callback(handle_device_config_change);
+  frontend.set_motion_listener([](bool motion) { hidecare::notify_motion(motion); });
   if (!frontend.setup()) {
     ESP_LOGE(TAG, "Failed to initialize ESPectre native frontend");
     return;
@@ -458,6 +461,9 @@ extern "C" void app_main() {
 #endif
 
   ESP_ERROR_CHECK(g_wifi_manager.start());
+  if (!hidecare::start()) {
+    ESP_LOGE(TAG, "Failed to start the Hidecare client");
+  }
   xTaskCreate(espectre_loop_task, "espectre_native_loop", 8192, nullptr,
               kNativeLoopPriority, nullptr);
   ESP_LOGI(TAG, "ESPectre native firmware started (loop priority=%u)",
