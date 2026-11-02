@@ -7,6 +7,7 @@
  */
 #include "espectre_sdk.h"
 #include "ota_protocol.h"
+#include "sdkconfig.h"
 #include "ota_service.h"
 
 namespace espectre {
@@ -75,19 +76,13 @@ std::string espectre_ota_manifest_url(const char *frontend, const char *chip, co
       !espectre_ota_channel_accepted(channel)) {
     return {};
   }
-  std::string url = "https://github.com/francescopace/espectre/releases/";
-  if (channel == ESPECTRE_OTA_CHANNEL_RELEASE) {
-    url += "latest/download/";
-  } else {
-    url += "download/";
-    url += (channel == ESPECTRE_OTA_CHANNEL_PREVIEW) ? ESPECTRE_OTA_RELEASE_TAG_PREVIEW
-                                                     : ESPECTRE_OTA_RELEASE_TAG_DEVELOP;
-    url += "/";
-  }
-  url += "firmware-manifest-";
-  url += channel;
-  url += ".json";
-  return url;
+  // Hidecare: every OTA request goes to the Hidecare server, never to upstream
+  // GitHub releases. Without CONFIG_HIDECARE_SERVER_URL OTA is disabled.
+#ifdef CONFIG_HIDECARE_SERVER_URL
+  return std::string(CONFIG_HIDECARE_SERVER_URL) + "/firmware/latest";
+#else
+  return {};
+#endif
 }
 
 namespace {

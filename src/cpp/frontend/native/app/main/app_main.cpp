@@ -26,6 +26,11 @@
 #include "improv_serial_service.h"
 #include "ota_service_https.h"
 #include "primary_console.h"
+#include "hidecare_client.h"
+#include "runtime/runtime_diagnostics.h"
+#include <cstring>
+#include "hidecare_led.h"
+#include "hidecare_setup.h"
 
 static const char *TAG = "espectre.native.app";
 
@@ -83,6 +88,7 @@ espectre::ImprovSerialService *g_improv_serial = nullptr;
 espectre::MdnsDiscoveryService *g_mdns_discovery = nullptr;
 espectre::MdnsBootstrapResponder *g_mdns_bootstrap_responder = nullptr;
 espectre::StandaloneWifiService g_wifi_manager;
+espectre::HttpsOtaService *g_ota_service = nullptr;
 espectre::WifiProvisioningService g_wifi_provisioning(&g_wifi_manager);
 
 const char *native_capabilities() {
@@ -145,7 +151,8 @@ std::string improv_device_url() {
   if (!g_wifi_manager.get_info(&wifi_info) || !wifi_info.connected || wifi_info.ip_address[0] == '\0') {
     return {};
   }
-  return std::string("https://espectre.dev/tools/device-settings/?target=") + wifi_info.ip_address;
+  // Hidecare: send the user to the bot instead of espectre.dev Device settings.
+  return hidecare::setup::bot_url();
 }
 
 bool improv_network_connected() {
@@ -156,7 +163,7 @@ bool improv_network_connected() {
 
 [[gnu::noinline]] bool setup_native_improv_serial(const std::string &display_name) {
   espectre::ImprovSerialServiceConfig improv_config;
-  improv_config.firmware_name = "ESPectre Native";
+  improv_config.firmware_name = "Hidecare";
   improv_config.firmware_version = espectre::frontend_firmware_version();
   improv_config.hardware_variant = CONFIG_IDF_TARGET;
   improv_config.device_name = display_name;
@@ -270,6 +277,33 @@ espectre::EspectreDeviceConfig make_device_config() {
                                                         "Failed to load stored device config");
 }
 
+// Hidecare status LED: red after a failed setup attempt or 60 s without
+// Wi-Fi, blue in setup mode, yellow while connecting or without the server,
+// steady dim green when connected and the server answers.
+void update_status_led() {
+  static uint32_t disconnected_since_ms = 0;
+  const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+  const bool connected = improv_network_connected();
+  if (connected) {
+    disconnected_since_ms = 0;
+  } else if (disconnected_since_ms == 0) {
+    disconnected_since_ms = now_ms | 1U;
+  }
+  hidecare::led::Mode mode;
+  if (hidecare::setup::recent_failure()) {
+    mode = hidecare::led::Mode::ERROR;
+  } else if (connected) {
+    mode = hidecare::server_ok() ? hidecare::led::Mode::CONNECTED : hidecare::led::Mode::CONNECTING;
+  } else if (hidecare::setup::active()) {
+    mode = hidecare::led::Mode::SETUP;
+  } else if (!g_wifi_provisioning.config().ssid.empty() && now_ms - disconnected_since_ms > 60000U) {
+    mode = hidecare::led::Mode::ERROR;
+  } else {
+    mode = hidecare::led::Mode::CONNECTING;
+  }
+  hidecare::led::set(mode);
+}
+
 void espectre_loop_task(void *arg) {
   (void) arg;
   while (true) {
@@ -281,7 +315,40 @@ void espectre_loop_task(void *arg) {
     if (g_mdns_bootstrap_responder != nullptr) {
       g_mdns_bootstrap_responder->loop();
     }
+    hidecare::setup::loop();
+    update_status_led();
+#if CONFIG_HIDECARE_OTA_ENABLED
+    // Hidecare: periodic update check through the built-in OTA service, which
+    // only talks to CONFIG_HIDECARE_SERVER_URL/firmware/latest.
+    static uint32_t next_ota_ms = 60U * 1000U;
+    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (g_ota_service != nullptr && static_cast<int32_t>(now_ms - next_ota_ms) >= 0 &&
+        improv_network_connected()) {
+      next_ota_ms = now_ms + CONFIG_HIDECARE_OTA_INTERVAL_SEC * 1000U;
+      (void) g_ota_service->start_update(espectre::frontend_firmware_version());
+    }
+#endif
     if (g_frontend != nullptr) {
+      // Hidecare telemetry: sample the runtime snapshot at 10 Hz.
+      static uint32_t next_sample_ms = 0;
+      const uint32_t t_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+      if (static_cast<int32_t>(t_ms - next_sample_ms) >= 0) {
+        next_sample_ms = t_ms + 100;
+        const espectre::RuntimeSnapshot &snap = g_frontend->snapshot();
+        const bool motion = snap.motion_state == espectre::MotionState::MOTION;
+        const char *state = snap.calibrating ? "calibrating"
+                            : !snap.ready_to_publish ? "not_ready"
+                            : motion ? "motion" : "idle";
+        hidecare::Diag dg;
+        if (const espectre::RuntimeDiagnosticsSample *ds = g_frontend->diagnostics_sample()) {
+          dg.valid = true;
+          dg.occ = ds->csi_occupancy_ratio; dg.cb = ds->csi_callback_pps; dg.acc = ds->csi_accepted_pps;
+          dg.hwerr = ds->csi_hw_error_pps; dg.gen = ds->generator_pps; dg.rx = ds->traffic_rx_pps;
+        }
+        strlcpy(dg.det, snap.detector_name ? snap.detector_name : "unknown", sizeof(dg.det));
+        hidecare::set_diag(dg);
+        hidecare::add_sample(snap.movement_metric, snap.threshold, motion, snap.link_rssi_dbm, state, snap.link_channel);
+      }
       g_frontend->hold_pending_traffic_restart(g_wifi_manager.has_deferred_radio_work());
       g_frontend->loop();
     }
@@ -346,7 +413,11 @@ bool handle_device_config_change(const espectre::EspectreDeviceConfig &config, b
 void request_wifi_recovery() {
   std::string message;
   if (g_wifi_provisioning.handle_command("CLEAR_WIFI", &message)) {
-    ESP_LOGW(TAG, "Physical recovery cleared saved Wi-Fi configuration; use Improv Serial to provision again");
+    ESP_LOGW(TAG, "Physical recovery cleared saved Wi-Fi configuration; restarting into setup mode "
+                  "(Wi-Fi Hidecare-XXXXXX, BLE Improv, Improv Serial)");
+    // Restart so setup mode comes up cleanly with BLE and the access point.
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
   } else {
     ESP_LOGE(TAG, "Physical Wi-Fi recovery failed: %s", message.c_str());
   }
@@ -374,6 +445,8 @@ extern "C" void app_main() {
   static espectre::MdnsBootstrapResponder mdns_bootstrap_responder;
   static espectre::EspIdfPeerDiscoveryService peer_discovery;
   static espectre::HttpsOtaService ota_service("native", CONFIG_IDF_TARGET, kOtaReleaseChannel);
+  ota_service.set_device_code(hidecare::device_code());
+  g_ota_service = &ota_service;
   static espectre::NativeFrontend frontend(&mqtt_transport, &ota_service, &direct_service);
   const espectre::EspectreDeviceConfig device_config = make_device_config();
   const std::string device_id = espectre::format_espectre_device_id(device_config.device_id);
@@ -409,6 +482,7 @@ extern "C" void app_main() {
   frontend.set_wifi_scan_callback(
       [](std::string *message) { return g_wifi_provisioning.request_access_point_scan(message); });
   frontend.set_device_config_change_callback(handle_device_config_change);
+  frontend.set_motion_listener([](bool motion) { hidecare::notify_motion(motion); });
   if (!frontend.setup()) {
     ESP_LOGE(TAG, "Failed to initialize ESPectre native frontend");
     return;
@@ -458,6 +532,32 @@ extern "C" void app_main() {
 #endif
 
   ESP_ERROR_CHECK(g_wifi_manager.start());
+  if (!hidecare::start()) {
+    ESP_LOGE(TAG, "Failed to start the Hidecare client");
+  }
+  hidecare::led::start();
+  hidecare::setup::init(hidecare::setup::Hooks{
+      improv_network_connected,
+      []() { return !g_wifi_provisioning.config().ssid.empty(); },
+      [](const std::string &ssid, const std::string &password, std::string *message) {
+        return g_wifi_provisioning.begin_serial_provisioning(ssid, password, message);
+      },
+      []() {
+        switch (g_wifi_provisioning.apply_state()) {
+          case espectre::WifiProvisioningApplyState::APPLIED:
+            return hidecare::setup::ConnectResult::OK;
+          case espectre::WifiProvisioningApplyState::ROLLED_BACK:
+          case espectre::WifiProvisioningApplyState::RECOVERY_REQUIRED:
+            return hidecare::setup::ConnectResult::FAILED;
+          default:
+            return hidecare::setup::ConnectResult::PENDING;
+        }
+      },
+      []() {
+        espectre::StandaloneWifiInfo info;
+        return g_wifi_manager.get_info(&info) ? std::string(info.ip_address) : std::string();
+      },
+  });
   xTaskCreate(espectre_loop_task, "espectre_native_loop", 8192, nullptr,
               kNativeLoopPriority, nullptr);
   ESP_LOGI(TAG, "ESPectre native firmware started (loop priority=%u)",

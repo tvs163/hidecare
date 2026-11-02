@@ -33,6 +33,8 @@ class NativeFrontend : public IRuntimeListener {
   using WifiScanCallback = std::function<bool(std::string *message)>;
   using DeviceConfigChangeCallback =
       std::function<bool(const EspectreDeviceConfig &config, bool clear, std::string *message)>;
+  /** Called from loop() with each debounced motion state edge (true = motion). */
+  using MotionListener = std::function<void(bool motion)>;
 
   explicit NativeFrontend(IMqttTransport *mqtt_transport = nullptr, IOtaService *ota_service = nullptr,
                           IDirectHttpService *direct_service = nullptr);
@@ -46,6 +48,7 @@ class NativeFrontend : public IRuntimeListener {
   void set_provisioning_command_callback(ProvisioningCommandCallback callback);
   void set_wifi_scan_callback(WifiScanCallback callback);
   void set_device_config_change_callback(DeviceConfigChangeCallback callback);
+  void set_motion_listener(MotionListener listener) { motion_listener_ = std::move(listener); }
   void prepare_for_wifi_reconfigure();
   void resume_after_wifi_reconfigure();
   /** False while a traffic stop or its CSI disable is in progress. */
@@ -56,6 +59,8 @@ class NativeFrontend : public IRuntimeListener {
   const EspectreDeviceConfig &device_config() const { return device_config_; }
   const RuntimeConfig &runtime_config() const { return runtime_.config(); }
   const RuntimeSnapshot &snapshot() const { return runtime_.snapshot(); }
+  /** Latest rate diagnostics (pps, hwerr, occupancy); nullptr before the first sample. */
+  const RuntimeDiagnosticsSample *diagnostics_sample() const { return runtime_.diagnostics_sample(); }
   const RuntimeCapabilities &capabilities() const { return runtime_.capabilities(); }
   bool is_setup_complete() const { return runtime_.is_setup_complete(); }
   size_t direct_client_count() const;
@@ -107,6 +112,7 @@ class NativeFrontend : public IRuntimeListener {
   ProvisioningCommandCallback provisioning_command_callback_{};
   WifiScanCallback wifi_scan_callback_{};
   DeviceConfigChangeCallback device_config_change_callback_{};
+  MotionListener motion_listener_{};
   RuntimeFrontendController runtime_;
   EspectreDeviceConfig device_config_{};
   EspectreDeviceInfo device_info_{};

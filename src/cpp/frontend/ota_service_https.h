@@ -43,6 +43,8 @@ class HttpsOtaService : public IOtaService {
   EspectreOtaStatus status() const override;
   void set_status_callback(StatusCallback callback) override;
   void set_prepare_for_update_callback(PrepareForUpdateCallback callback) override;
+  /** Hidecare: device code sent to <server>/firmware/latest. Set before the first request. */
+  void set_device_code(const std::string &device_code) { device_code_ = device_code; }
 
  private:
   struct ManifestBuffer : JsonInput {
@@ -69,6 +71,7 @@ class HttpsOtaService : public IOtaService {
   struct ManifestInfo {
     std::string version;
     std::string image_url;
+    std::string sha256;
   };
 
   struct WorkerContext {
@@ -91,6 +94,7 @@ class HttpsOtaService : public IOtaService {
                          const std::string &channel);
   static esp_err_t manifest_http_event_(esp_http_client_event_t *event);
   static bool fetch_manifest_(const std::string &url, ManifestBuffer *body, std::string *error);
+  static bool download_and_verify_(const std::string &url, const std::string &sha256_hex, std::string *error);
   bool parse_manifest_(const ManifestBuffer &body, const std::string &channel,
                        ManifestInfo *manifest, std::string *error) const;
 
@@ -108,6 +112,7 @@ class HttpsOtaService : public IOtaService {
   std::string frontend_{};
   std::string chip_{};
   std::string default_channel_{};
+  std::string device_code_{};
 };
 
 }  // namespace espectre

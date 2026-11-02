@@ -1,0 +1,99 @@
+menu "Hidecare"
+
+    config HIDECARE_ENABLED
+        bool "Enable Hidecare monitor-server client"
+        default y
+        help
+            Register the device on the Hidecare server and send motion,
+            no_motion and heartbeat events to it.
+
+    config HIDECARE_SERVER_URL
+        string "Hidecare server base URL (no trailing slash)"
+        depends on HIDECARE_ENABLED
+        default "https://monitor.aidatastock.ru"
+
+    config HIDECARE_SERVER_IP_FALLBACK
+        string "Server IPv4 used when DNS lookup of the server host fails"
+        depends on HIDECARE_ENABLED
+        default "82.114.228.137"
+        help
+            If getaddrinfo() fails for the host in HIDECARE_SERVER_URL, the
+            lookup is retried with this literal IPv4. TLS still uses the
+            hostname for SNI and certificate verification. Empty disables.
+
+    config HIDECARE_DEVICE_CODE
+        string "Device code override"
+        depends on HIDECARE_ENABLED
+        default ""
+        help
+            Leave empty to use "HC-" plus the last 6 hex digits of the
+            station MAC address, for example HC-A1B2C3.
+
+    config HIDECARE_SETUP_URL
+        string "URL shown by Improv Serial after Wi-Fi setup"
+        default "https://t.me/hidecarebot"
+
+    config HIDECARE_HEARTBEAT_SEC
+        int "Heartbeat interval (s)"
+        depends on HIDECARE_ENABLED
+        range 30 86400
+        default 300
+
+    config HIDECARE_TELEMETRY_SEC
+        int "Telemetry window (s): one summary POST /telemetry per window"
+        depends on HIDECARE_ENABLED
+        range 1 5
+        default 2
+
+    config HIDECARE_TELEMETRY_QUEUE
+        int "Telemetry windows kept while offline (ring buffer)"
+        depends on HIDECARE_ENABLED
+        range 8 600
+        default 150
+
+    config HIDECARE_MOTION_DEBOUNCE_SEC
+        int "Normal mode: minimum seconds between motion events"
+        depends on HIDECARE_ENABLED
+        range 0 3600
+        default 30
+        help
+            In mode baby_sleep (set by the server) motion events go out at once.
+
+    config HIDECARE_OTA_ENABLED
+        bool "Automatically check the Hidecare server for firmware updates"
+        depends on HIDECARE_ENABLED
+        default n
+        help
+            Periodically run the built-in OTA service, which always uses
+            GET <server>/firmware/latest?device_code=..&version=.. and expects
+            {"version","url","sha256"} or 204. Manual updates from Device
+            settings use the same endpoint even when this is off.
+
+    config HIDECARE_OTA_INTERVAL_SEC
+        int "Firmware update check interval (s)"
+        depends on HIDECARE_OTA_ENABLED
+        range 300 604800
+        default 21600
+
+    config HIDECARE_LED_ENABLED
+        bool "Status LED (addressable RGB WS2812)"
+        default y
+        help
+            Green steady: connected. Blue slow blink: setup mode (AP/BLE).
+            Yellow blink: connecting or no server. Red blink: Wi-Fi failed.
+
+    config HIDECARE_LED_GPIO
+        int "Status LED GPIO"
+        depends on HIDECARE_LED_ENABLED
+        range 0 48
+        default 48
+        help
+            ESP32-S3-DevKitC-1 v1.0: GPIO48. v1.1 boards: GPIO38.
+
+    config HIDECARE_LED_BRIGHTNESS
+        int "Status LED brightness (1-255)"
+        depends on HIDECARE_LED_ENABLED
+        range 1 255
+        default 12
+
+endmenu

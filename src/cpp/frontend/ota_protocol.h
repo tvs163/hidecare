@@ -69,15 +69,13 @@ std::string espectre_ota_status_payload(const EspectreDeviceConfig &config,
  */
 bool espectre_ota_channel_accepted(const std::string &channel);
 /**
- * Built-in GitHub Releases firmware catalog URL for the selected channel.
+ * Hidecare firmware endpoint: `CONFIG_HIDECARE_SERVER_URL` + `/firmware/latest`.
  *
- * `release` uses `/releases/latest/download/`. `preview` uses tag
- * `ESPECTRE_OTA_RELEASE_TAG_PREVIEW` (`snapshot`). `develop` uses tag
- * `ESPECTRE_OTA_RELEASE_TAG_DEVELOP` (`snapshot-dev`).
- * Each channel publishes `firmware-manifest-<channel>.json`; the OTA service
- * selects the frontend and chip from that catalog.
+ * The OTA service appends `?device_code=..&version=..`. The server answers
+ * 204 (nothing newer) or `{"version","url","sha256"}`. Upstream GitHub
+ * releases are never used. The channel is validated but not sent.
  *
- * @return Empty when `frontend`, `chip`, or `channel` is not a published value.
+ * @return Empty when the inputs are invalid or Hidecare is not configured.
  */
 std::string espectre_ota_manifest_url(const char *frontend, const char *chip, const std::string &channel);
 
