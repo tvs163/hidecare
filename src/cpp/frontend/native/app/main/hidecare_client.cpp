@@ -1,3 +1,5 @@
+#include <atomic>
+#include <mutex>
 /*
  * Hidecare monitor-server client. See hidecare_client.h.
  *
@@ -49,6 +51,7 @@ struct QueuedEvent {
 QueueHandle_t g_queue = nullptr;
 std::string g_device_code;
 std::string g_mac;
+std::atomic<bool> g_server_ok{false};
 
 const char *event_name(EventKind kind) {
   switch (kind) {
@@ -122,6 +125,7 @@ int post_json(const char *path, const std::string &body, std::string *response =
     }
   }
   esp_http_client_cleanup(client);
+  g_server_ok.store(status >= 200 && status < 300);
   return status;
 }
 
@@ -214,8 +218,17 @@ void client_task(void *) {
 
 }  // namespace
 
+void compute_device_code();
+
 std::string device_code() {
-  if (!g_device_code.empty()) return g_device_code;
+  // Computed once; both the code and the setup AP name derive from the
+  // station MAC (ESP_MAC_WIFI_STA), never the SoftAP/BT MAC.
+  static std::once_flag once;
+  std::call_once(once, compute_device_code);
+  return g_device_code;
+}
+
+void compute_device_code() {
   uint8_t mac[6] = {};
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
   char buf[24];
@@ -227,12 +240,18 @@ std::string device_code() {
     snprintf(buf, sizeof(buf), "HC-%02X%02X%02X", mac[3], mac[4], mac[5]);
     g_device_code = buf;
   }
-  return g_device_code;
 }
+
+std::string device_suffix() {
+  const std::string code = device_code();
+  return code.rfind("HC-", 0) == 0 ? code.substr(3) : code;
+}
+
+bool server_ok() { return g_server_ok.load(); }
 
 bool start() {
   if (g_queue != nullptr) return true;
-  ESP_LOGI(TAG, "device_code=%s server=%s", device_code().c_str(), CONFIG_HIDECARE_SERVER_URL);
+  ESP_LOGI(TAG, "device_code=%s mac=%s server=%s", device_code().c_str(), g_mac.c_str(), CONFIG_HIDECARE_SERVER_URL);
   g_queue = xQueueCreate(16, sizeof(QueuedEvent));
   if (g_queue == nullptr) return false;
   return xTaskCreate(client_task, "hidecare", 8192, nullptr, 3, nullptr) == pdPASS;
@@ -246,6 +265,8 @@ void notify_motion(bool motion) { enqueue(motion ? EventKind::MOTION : EventKind
 
 namespace hidecare {
 std::string device_code() { return {}; }
+std::string device_suffix() { return {}; }
+bool server_ok() { return false; }
 bool start() { return true; }
 void notify_motion(bool) {}
 }  // namespace hidecare

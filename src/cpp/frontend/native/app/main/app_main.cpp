@@ -27,6 +27,7 @@
 #include "ota_service_https.h"
 #include "primary_console.h"
 #include "hidecare_client.h"
+#include "hidecare_led.h"
 #include "hidecare_setup.h"
 
 static const char *TAG = "espectre.native.app";
@@ -274,6 +275,33 @@ espectre::EspectreDeviceConfig make_device_config() {
                                                         "Failed to load stored device config");
 }
 
+// Hidecare status LED: red after a failed setup attempt or 60 s without
+// Wi-Fi, blue in setup mode, yellow while connecting or without the server,
+// steady dim green when connected and the server answers.
+void update_status_led() {
+  static uint32_t disconnected_since_ms = 0;
+  const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+  const bool connected = improv_network_connected();
+  if (connected) {
+    disconnected_since_ms = 0;
+  } else if (disconnected_since_ms == 0) {
+    disconnected_since_ms = now_ms | 1U;
+  }
+  hidecare::led::Mode mode;
+  if (hidecare::setup::recent_failure()) {
+    mode = hidecare::led::Mode::ERROR;
+  } else if (connected) {
+    mode = hidecare::server_ok() ? hidecare::led::Mode::CONNECTED : hidecare::led::Mode::CONNECTING;
+  } else if (hidecare::setup::active()) {
+    mode = hidecare::led::Mode::SETUP;
+  } else if (!g_wifi_provisioning.config().ssid.empty() && now_ms - disconnected_since_ms > 60000U) {
+    mode = hidecare::led::Mode::ERROR;
+  } else {
+    mode = hidecare::led::Mode::CONNECTING;
+  }
+  hidecare::led::set(mode);
+}
+
 void espectre_loop_task(void *arg) {
   (void) arg;
   while (true) {
@@ -286,6 +314,7 @@ void espectre_loop_task(void *arg) {
       g_mdns_bootstrap_responder->loop();
     }
     hidecare::setup::loop();
+    update_status_led();
 #if CONFIG_HIDECARE_OTA_ENABLED
     // Hidecare: periodic update check through the built-in OTA service, which
     // only talks to CONFIG_HIDECARE_SERVER_URL/firmware/latest.
@@ -484,6 +513,7 @@ extern "C" void app_main() {
   if (!hidecare::start()) {
     ESP_LOGE(TAG, "Failed to start the Hidecare client");
   }
+  hidecare::led::start();
   hidecare::setup::init(hidecare::setup::Hooks{
       improv_network_connected,
       []() { return !g_wifi_provisioning.config().ssid.empty(); },

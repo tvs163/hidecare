@@ -46,4 +46,25 @@ menu "Hidecare"
         range 300 604800
         default 21600
 
+    config HIDECARE_LED_ENABLED
+        bool "Status LED (addressable RGB WS2812)"
+        default y
+        help
+            Green steady: connected. Blue slow blink: setup mode (AP/BLE).
+            Yellow blink: connecting or no server. Red blink: Wi-Fi failed.
+
+    config HIDECARE_LED_GPIO
+        int "Status LED GPIO"
+        depends on HIDECARE_LED_ENABLED
+        range 0 48
+        default 48
+        help
+            ESP32-S3-DevKitC-1 v1.0: GPIO48. v1.1 boards: GPIO38.
+
+    config HIDECARE_LED_BRIGHTNESS
+        int "Status LED brightness (1-255)"
+        depends on HIDECARE_LED_ENABLED
+        range 1 255
+        default 12
+
 endmenu

@@ -78,11 +78,9 @@ uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 std::string code() { return hidecare::device_code(); }
 
-std::string ap_ssid() {
-  std::string c = code();
-  if (c.rfind("HC-", 0) == 0) c = c.substr(3);
-  return "Hidecare-" + c;
-}
+std::string ap_ssid() { return "Hidecare-" + hidecare::device_suffix(); }
+
+uint32_t g_fail_ms = 0;
 
 std::string json_escape(const std::string &s) {
   std::string out;
@@ -403,6 +401,7 @@ void set_result(ConnectResult r, const std::string &msg) {
   g_result = r;
   g_result_valid = true;
   g_result_msg = msg;
+  if (r == ConnectResult::FAILED) g_fail_ms = now_ms() | 1U;
 }
 
 void handle_connect(uint32_t now, bool connected) {
@@ -460,6 +459,11 @@ std::string bot_url() {
 }
 
 bool active() { return g_active.load(); }
+
+bool recent_failure() {
+  std::lock_guard<std::mutex> lock(g_mtx);
+  return g_fail_ms != 0 && now_ms() - g_fail_ms < 10000U;
+}
 
 bool queue_connect(const std::string &ssid, const std::string &password) {
   if (ssid.empty() || ssid.size() > 32 || password.size() > 64) {

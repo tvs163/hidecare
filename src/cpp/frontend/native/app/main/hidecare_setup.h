@@ -30,6 +30,8 @@ void init(Hooks hooks);
 void loop();
 // True while the AP and/or BLE are up.
 bool active();
+// True for 10 s after a setup connect attempt failed.
+bool recent_failure();
 // URL the user should open after a successful setup.
 std::string bot_url();
 

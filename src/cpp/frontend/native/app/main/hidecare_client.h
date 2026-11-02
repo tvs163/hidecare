@@ -17,6 +17,12 @@ namespace hidecare {
 /** "HC-" + last 6 hex digits of the station MAC, or the Kconfig override. */
 std::string device_code();
 
+// Device code without the "HC-" prefix (used in the setup AP/BLE name).
+std::string device_suffix();
+
+// True after the last request to the Hidecare server succeeded.
+bool server_ok();
+
 /** Start the background task. Call once after Wi-Fi is started. */
 bool start();
 

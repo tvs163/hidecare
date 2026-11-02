@@ -4,6 +4,7 @@ idf_component_register(
         "hidecare_client.cpp"
         "hidecare_setup.cpp"
         "hidecare_ble.cpp"
+        "hidecare_led.cpp"
     INCLUDE_DIRS
         "."
         "../../espectre"
