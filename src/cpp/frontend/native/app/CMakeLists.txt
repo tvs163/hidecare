@@ -10,6 +10,14 @@
 
 cmake_minimum_required(VERSION 3.16)
 
+# Hidecare: release version comes from HIDECARE_VERSION so builds get a clean
+# MAJOR.MINOR.PATCH without a git-describe suffix. ESPECTRE_GIT_VERSION (CMake
+# or env) still overrides it.
+if((NOT DEFINED ESPECTRE_GIT_VERSION OR ESPECTRE_GIT_VERSION STREQUAL "") AND
+   "$ENV{ESPECTRE_GIT_VERSION}" STREQUAL "" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/HIDECARE_VERSION")
+    file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/HIDECARE_VERSION" ESPECTRE_GIT_VERSION LIMIT_COUNT 1)
+    string(STRIP "${ESPECTRE_GIT_VERSION}" ESPECTRE_GIT_VERSION)
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../../espectre_git_version.cmake")
 set(PROJECT_VER "${ESPECTRE_GIT_VERSION}")
 

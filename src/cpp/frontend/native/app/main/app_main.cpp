@@ -27,6 +27,7 @@
 #include "ota_service_https.h"
 #include "primary_console.h"
 #include "hidecare_client.h"
+#include "hidecare_setup.h"
 
 static const char *TAG = "espectre.native.app";
 
@@ -148,7 +149,7 @@ std::string improv_device_url() {
     return {};
   }
   // Hidecare: send the user to the bot instead of espectre.dev Device settings.
-  return std::string(CONFIG_HIDECARE_SETUP_URL);
+  return hidecare::setup::bot_url();
 }
 
 bool improv_network_connected() {
@@ -284,6 +285,7 @@ void espectre_loop_task(void *arg) {
     if (g_mdns_bootstrap_responder != nullptr) {
       g_mdns_bootstrap_responder->loop();
     }
+    hidecare::setup::loop();
 #if CONFIG_HIDECARE_OTA_ENABLED
     // Hidecare: periodic update check through the built-in OTA service, which
     // only talks to CONFIG_HIDECARE_SERVER_URL/firmware/latest.
@@ -360,7 +362,11 @@ bool handle_device_config_change(const espectre::EspectreDeviceConfig &config, b
 void request_wifi_recovery() {
   std::string message;
   if (g_wifi_provisioning.handle_command("CLEAR_WIFI", &message)) {
-    ESP_LOGW(TAG, "Physical recovery cleared saved Wi-Fi configuration; use Improv Serial to provision again");
+    ESP_LOGW(TAG, "Physical recovery cleared saved Wi-Fi configuration; restarting into setup mode "
+                  "(Wi-Fi Hidecare-XXXXXX, BLE Improv, Improv Serial)");
+    // Restart so setup mode comes up cleanly with BLE and the access point.
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
   } else {
     ESP_LOGE(TAG, "Physical Wi-Fi recovery failed: %s", message.c_str());
   }
@@ -478,6 +484,28 @@ extern "C" void app_main() {
   if (!hidecare::start()) {
     ESP_LOGE(TAG, "Failed to start the Hidecare client");
   }
+  hidecare::setup::init(hidecare::setup::Hooks{
+      improv_network_connected,
+      []() { return !g_wifi_provisioning.config().ssid.empty(); },
+      [](const std::string &ssid, const std::string &password, std::string *message) {
+        return g_wifi_provisioning.begin_serial_provisioning(ssid, password, message);
+      },
+      []() {
+        switch (g_wifi_provisioning.apply_state()) {
+          case espectre::WifiProvisioningApplyState::APPLIED:
+            return hidecare::setup::ConnectResult::OK;
+          case espectre::WifiProvisioningApplyState::ROLLED_BACK:
+          case espectre::WifiProvisioningApplyState::RECOVERY_REQUIRED:
+            return hidecare::setup::ConnectResult::FAILED;
+          default:
+            return hidecare::setup::ConnectResult::PENDING;
+        }
+      },
+      []() {
+        espectre::StandaloneWifiInfo info;
+        return g_wifi_manager.get_info(&info) ? std::string(info.ip_address) : std::string();
+      },
+  });
   xTaskCreate(espectre_loop_task, "espectre_native_loop", 8192, nullptr,
               kNativeLoopPriority, nullptr);
   ESP_LOGI(TAG, "ESPectre native firmware started (loop priority=%u)",
