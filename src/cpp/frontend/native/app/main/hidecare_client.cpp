@@ -1,3 +1,4 @@
+#include <cmath>
 /*
  * Hidecare monitor-server client. See hidecare_client.h.
  *
@@ -54,6 +55,8 @@ struct TelemetryWindow {
   float mvmt_avg, mvmt_max, motion_ratio, thr;
   int8_t rssi;
   char state[12];
+  float mvmt_std, mvmt_min;  // ext v1
+  uint8_t channel;
 };
 
 // Ring buffer of finished windows, guarded by g_tel_mutex.
@@ -64,8 +67,9 @@ uint32_t g_tel_dropped = 0;
 // Current window accumulator (frontend task only).
 struct {
   uint32_t start_ms = 0, n = 0, n_motion = 0;
-  double sum = 0;
-  float max = 0, thr = 0;
+  double sum = 0, sumsq = 0;
+  float max = 0, min = 0, thr = 0;
+  uint8_t channel = 0;
   int rssi = 0;
   char state[12] = "not_ready";
 } g_acc;
@@ -240,7 +244,9 @@ bool flush_telemetry() {
             ",\"up_ms\":" + std::to_string(w.up_ms) +
             ",\"mvmt_avg\":" + fmt_float(w.mvmt_avg) + ",\"mvmt_max\":" + fmt_float(w.mvmt_max) +
             ",\"motion_ratio\":" + fmt_float(w.motion_ratio) + ",\"thr\":" + fmt_float(w.thr) +
-            ",\"rssi\":" + std::to_string(w.rssi) + ",\"state\":\"" + w.state + "\"}";
+            ",\"rssi\":" + std::to_string(w.rssi) + ",\"state\":\"" + w.state + "\"" +
+            ",\"ext\":{\"v\":1,\"std\":" + fmt_float(w.mvmt_std) + ",\"min\":" + fmt_float(w.mvmt_min) +
+            ",\"ch\":" + std::to_string(w.channel) + "}}";
   }
   body += "]}";
   const int status = post_telemetry(body);
@@ -414,14 +420,17 @@ void notify_motion(bool motion) {
   }
 }
 
-void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state) {
+void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state, uint8_t channel) {
   if (g_queue == nullptr) return;
   const uint32_t now = now_ms();
   if (g_acc.n == 0) g_acc.start_ms = now;
   if (mvmt < 0 || mvmt != mvmt) mvmt = 0;
   g_acc.n++;
   g_acc.sum += mvmt;
+  g_acc.sumsq += static_cast<double>(mvmt) * mvmt;
   if (mvmt > g_acc.max) g_acc.max = mvmt;
+  if (g_acc.n == 1 || mvmt < g_acc.min) g_acc.min = mvmt;
+  if (channel) g_acc.channel = channel;
   if (motion) g_acc.n_motion++;
   g_acc.thr = thr;
   if (rssi != INT8_MIN) g_acc.rssi = rssi;
@@ -436,8 +445,15 @@ void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state)
   w.thr = g_acc.thr;
   w.rssi = static_cast<int8_t>(g_acc.rssi);
   strlcpy(w.state, g_acc.state, sizeof(w.state));
+  {
+    const double mean = g_acc.sum / g_acc.n;
+    const double var = g_acc.sumsq / g_acc.n - mean * mean;
+    w.mvmt_std = static_cast<float>(var > 0 ? std::sqrt(var) : 0.0);
+  }
+  w.mvmt_min = g_acc.min;
+  w.channel = g_acc.channel;
   g_acc.n = g_acc.n_motion = 0;
-  g_acc.sum = 0;
+  g_acc.sum = g_acc.sumsq = 0;
   g_acc.max = 0;
   std::lock_guard<std::mutex> lock(g_tel_mutex);
   const size_t cap = CONFIG_HIDECARE_TELEMETRY_QUEUE;
@@ -456,7 +472,7 @@ std::string device_suffix() { return {}; }
 bool server_ok() { return false; }
 bool start() { return true; }
 void notify_motion(bool) {}
-void add_sample(float, float, bool, int, const char *) {}
+void add_sample(float, float, bool, int, const char *, uint8_t) {}
 bool baby_sleep_mode() { return false; }
 }  // namespace hidecare
 

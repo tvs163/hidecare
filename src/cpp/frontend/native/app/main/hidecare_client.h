@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: GPL-3.0-only
  */
 #pragma once
+#include <cstdint>
 
 #include <string>
 
@@ -32,7 +33,7 @@ bool start();
  * /telemetry, buffering windows while offline. state: "idle", "motion",
  * "calibrating" or "not_ready".
  */
-void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state);
+void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state, uint8_t channel = 0);
 
 /** Server-assigned mode: true when "baby_sleep" (no motion debounce). */
 bool baby_sleep_mode();

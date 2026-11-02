@@ -337,7 +337,7 @@ void espectre_loop_task(void *arg) {
         const char *state = snap.calibrating ? "calibrating"
                             : !snap.ready_to_publish ? "not_ready"
                             : motion ? "motion" : "idle";
-        hidecare::add_sample(snap.movement_metric, snap.threshold, motion, snap.link_rssi_dbm, state);
+        hidecare::add_sample(snap.movement_metric, snap.threshold, motion, snap.link_rssi_dbm, state, snap.link_channel);
       }
       g_frontend->hold_pending_traffic_restart(g_wifi_manager.has_deferred_radio_work());
       g_frontend->loop();
