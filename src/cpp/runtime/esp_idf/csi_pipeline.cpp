@@ -9,6 +9,8 @@
  * Commercial licensing available under separate agreement; see LICENSING.md.
  */
 #include "csi_pipeline.h"
+#include "csi_tap.h"
+#include <atomic>
 #include <algorithm>
 #include <sdkconfig.h>
 #include "core/espectre_log.h"
@@ -379,6 +381,12 @@ bool CsiPipeline::take_detection_timing(DetectionTimingStats *stats) {
   return detection_timing_.take(stats);
 }
 
+namespace {
+std::atomic<csi_tap_fn> g_csi_tap{nullptr};
+}  // namespace
+
+void set_csi_tap(csi_tap_fn fn) { g_csi_tap.store(fn, std::memory_order_release); }
+
 void CsiPipeline::capture_packet_callback_(void *context,
                                            const wifi_csi_info_t *data,
                                            const NormalizedCSIPayload &normalized) {
@@ -403,6 +411,11 @@ void CsiPipeline::capture_packet_callback_(void *context,
       pipeline->traffic_rejected_packets_total_.fetch_add(1U, std::memory_order_relaxed);
       return;
     }
+  }
+
+  if (csi_tap_fn tap = g_csi_tap.load(std::memory_order_acquire)) {
+    tap(normalized.data, static_cast<uint16_t>(normalized.len), data->rx_ctrl.rssi,
+        static_cast<int8_t>(data->rx_ctrl.noise_floor), data->rx_ctrl.channel);
   }
 
   if (pipeline->raw_packet_callback_.load(std::memory_order_acquire) != nullptr) {

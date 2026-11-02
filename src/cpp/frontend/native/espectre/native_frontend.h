@@ -59,6 +59,8 @@ class NativeFrontend : public IRuntimeListener {
   const EspectreDeviceConfig &device_config() const { return device_config_; }
   const RuntimeConfig &runtime_config() const { return runtime_.config(); }
   const RuntimeSnapshot &snapshot() const { return runtime_.snapshot(); }
+  /** Latest rate diagnostics (pps, hwerr, occupancy); nullptr before the first sample. */
+  const RuntimeDiagnosticsSample *diagnostics_sample() const { return runtime_.diagnostics_sample(); }
   const RuntimeCapabilities &capabilities() const { return runtime_.capabilities(); }
   bool is_setup_complete() const { return runtime_.is_setup_complete(); }
   size_t direct_client_count() const;

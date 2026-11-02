@@ -35,6 +35,14 @@ bool start();
  */
 void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state, uint8_t channel = 0);
 
+/** Latest runtime diagnostics, sampled into each telemetry window's ext. */
+struct Diag {
+  bool valid{false};
+  float occ{0}, cb{0}, acc{0}, hwerr{0}, gen{0}, rx{0};
+  char det[16]{};
+};
+void set_diag(const Diag &d);
+
 /** Server-assigned mode: true when "baby_sleep" (no motion debounce). */
 bool baby_sleep_mode();
 

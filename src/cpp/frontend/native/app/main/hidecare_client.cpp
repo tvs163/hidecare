@@ -1,4 +1,3 @@
-#include <cmath>
 /*
  * Hidecare monitor-server client. See hidecare_client.h.
  *
@@ -6,7 +5,10 @@
  */
 #include "hidecare_client.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <sys/time.h>
 #include <mutex>
 #include <cctype>
 #include <cinttypes>
@@ -29,6 +31,8 @@
 #include <sdkconfig.h>
 
 #include "frontend_firmware_version.h"
+#include "runtime/esp_idf/csi_tap.h"
+#include <mbedtls/base64.h>
 
 #if CONFIG_HIDECARE_ENABLED
 
@@ -49,14 +53,73 @@ struct QueuedEvent {
   time_t timestamp;  // 0 when time was unknown at capture
 };
 
+// ---- ext v2: CSI band variance (filled by the Wi-Fi-context tap) ----------
+constexpr int kBands = 16;  // 64 HT20 subcarriers / 4
+portMUX_TYPE g_band_mux = portMUX_INITIALIZER_UNLOCKED;
+struct BandAcc { uint32_t n; float sum[kBands], sumsq[kBands]; } g_band_acc{};
+
+// ---- raw CSI capture (server-requested, labeled sessions) ------------------
+constexpr int kCsiRing = 48;
+constexpr int64_t kCsiMinGapUs = 50000;  // <= 20 frames/s go to the server
+constexpr uint32_t kCsiMaxSec = 120;
+struct CsiFrame { int64_t t_ms; int8_t rssi, noise; uint8_t ch; uint8_t len; int8_t iq[128]; };
+CsiFrame g_csi_ring[kCsiRing];
+int g_csi_head = 0, g_csi_count = 0;
+uint32_t g_csi_seq = 0, g_csi_drops = 0;
+int64_t g_csi_last_us = 0;
+std::atomic<int> g_csi_session{0};
+std::atomic<long long> g_csi_until{0};  // epoch seconds
+
+void csi_tap(const int8_t *iq, uint16_t len, int8_t rssi, int8_t noise, uint8_t ch) {
+  if (len < 128) return;
+  float amp[kBands];
+  for (int b = 0; b < kBands; b++) {
+    float a = 0;
+    for (int k = 0; k < 4; k++) {
+      const int i = (b * 4 + k) * 2;
+      a += std::sqrt(static_cast<float>(iq[i] * iq[i] + iq[i + 1] * iq[i + 1]));
+    }
+    amp[b] = a * 0.25f;
+  }
+  const bool cap = g_csi_session.load(std::memory_order_relaxed) != 0;
+  const int64_t now_us = esp_timer_get_time();
+  struct timeval tv;
+  if (cap) gettimeofday(&tv, nullptr);
+  portENTER_CRITICAL_SAFE(&g_band_mux);
+  g_band_acc.n++;
+  for (int b = 0; b < kBands; b++) { g_band_acc.sum[b] += amp[b]; g_band_acc.sumsq[b] += amp[b] * amp[b]; }
+  if (cap && now_us - g_csi_last_us >= kCsiMinGapUs) {
+    g_csi_last_us = now_us;
+    if (g_csi_count == kCsiRing) { g_csi_drops++; g_csi_head = (g_csi_head + 1) % kCsiRing; g_csi_count--; }
+    CsiFrame &f = g_csi_ring[(g_csi_head + g_csi_count) % kCsiRing];
+    f.t_ms = static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
+    f.rssi = rssi; f.noise = noise; f.ch = ch; f.len = 128;
+    memcpy(f.iq, iq, 128);
+    g_csi_count++;
+  }
+  portEXIT_CRITICAL_SAFE(&g_band_mux);
+}
+
+// Quantize variance as round(16*log2(1+var)), 0..255.
+uint8_t q_var(float v) {
+  if (!(v > 0)) return 0;
+  const float q = 16.0f * std::log2(1.0f + v);
+  return q >= 255.0f ? 255 : static_cast<uint8_t>(q + 0.5f);
+}
+
+Diag g_diag{};  // latest, frontend task only
+
 struct TelemetryWindow {
   time_t ts;         // epoch at window end, 0 if SNTP not synced yet
   uint32_t up_ms;    // uptime at window end (lets the server date ts=0 windows)
   float mvmt_avg, mvmt_max, motion_ratio, thr;
   int8_t rssi;
   char state[12];
-  float mvmt_std, mvmt_min;  // ext v1
+  float mvmt_std, mvmt_min, mvmt_p90;  // ext v2
   uint8_t channel;
+  Diag diag;
+  bool has_bands;
+  uint8_t bands[kBands];
 };
 
 // Ring buffer of finished windows, guarded by g_tel_mutex.
@@ -69,8 +132,9 @@ struct {
   uint32_t start_ms = 0, n = 0, n_motion = 0;
   double sum = 0, sumsq = 0;
   float max = 0, min = 0, thr = 0;
-  uint8_t channel = 0;
   int rssi = 0;
+  uint8_t channel = 0;
+  float vals[64];
   char state[12] = "not_ready";
 } g_acc;
 std::atomic<bool> g_baby_sleep{false};
@@ -217,11 +281,112 @@ std::string fmt_float(float v) {
   return b;
 }
 
+std::string ext_json(const TelemetryWindow &w) {
+  std::string e = "{\"v\":2,\"std\":" + fmt_float(w.mvmt_std) + ",\"min\":" + fmt_float(w.mvmt_min) +
+                  ",\"p90\":" + fmt_float(w.mvmt_p90) + ",\"ch\":" + std::to_string(w.channel);
+  if (w.diag.valid) {
+    e += ",\"occ\":" + fmt_float(w.diag.occ) + ",\"cb\":" + fmt_float(w.diag.cb) + ",\"acc\":" + fmt_float(w.diag.acc) +
+         ",\"hwerr\":" + fmt_float(w.diag.hwerr) + ",\"gen\":" + fmt_float(w.diag.gen) + ",\"rx\":" + fmt_float(w.diag.rx);
+  }
+  e += ",\"det\":\"" + std::string(w.diag.det[0] ? w.diag.det : "unknown") + "\"";
+  if (w.has_bands) {
+    char hex[kBands * 2 + 1];
+    for (int i = 0; i < kBands; i++) snprintf(hex + i * 2, 3, "%02x", w.bands[i]);
+    e += ",\"bands\":\"" + std::string(hex) + "\"";
+  }
+  return e + "}";
+}
+
+// Capture request in the /telemetry reply: "capture":{"id":N,"label":"..","kind":"csi","until":T}
+void apply_capture_from_response(const std::string &resp) {
+  const size_t k = resp.find("\"capture\"");
+  if (k == std::string::npos) {
+    if (g_csi_session.exchange(0) != 0) ESP_LOGI(TAG, "csi capture off");
+    return;
+  }
+  const size_t end = resp.find('}', k);
+  const std::string c = resp.substr(k, end == std::string::npos ? std::string::npos : end - k);
+  if (c.find("\"kind\":\"csi\"") == std::string::npos) { g_csi_session.store(0); return; }
+  auto num = [&](const char *key) -> long long {
+    const size_t p = c.find(key);
+    return p == std::string::npos ? 0 : atoll(c.c_str() + p + strlen(key));
+  };
+  const int id = static_cast<int>(num("\"id\":"));
+  long long until = num("\"until\":");
+  const long long cap = static_cast<long long>(now_utc()) + kCsiMaxSec;
+  if (until > cap) until = cap;
+  if (id > 0 && g_csi_session.load() != id) ESP_LOGI(TAG, "csi capture session %d until %lld", id, until);
+  g_csi_until.store(until);
+  g_csi_session.store(id);
+}
+
+esp_http_client_handle_t g_csi_client = nullptr;
+std::string g_csi_response;
+
+// Send buffered raw CSI frames. Frames: {"ts","t_ms","seq","rssi","nf","ch","iq":base64(128 B int8 I/Q)}.
+void flush_csi() {
+  const int sid = g_csi_session.load();
+  if (sid == 0) return;
+  if (static_cast<long long>(now_utc()) > g_csi_until.load()) {
+    g_csi_session.store(0);
+    ESP_LOGI(TAG, "csi capture %d done (drops=%" PRIu32 ")", sid, g_csi_drops);
+  }
+  static CsiFrame batch[kCsiRing];
+  int n = 0;
+  portENTER_CRITICAL(&g_band_mux);
+  while (g_csi_count > 0 && n < kCsiRing) {
+    batch[n++] = g_csi_ring[g_csi_head];
+    g_csi_head = (g_csi_head + 1) % kCsiRing;
+    g_csi_count--;
+  }
+  portEXIT_CRITICAL(&g_band_mux);
+  if (n == 0) return;
+  std::string body;
+  body.reserve(n * 260 + 80);
+  body = "{\"device_code\":" + json_str(g_device_code) + ",\"session_id\":" + std::to_string(sid) + ",\"frames\":[";
+  for (int i = 0; i < n; i++) {
+    unsigned char b64[180];
+    size_t ol = 0;
+    mbedtls_base64_encode(b64, sizeof(b64), &ol, reinterpret_cast<const unsigned char *>(batch[i].iq), batch[i].len);
+    if (i) body += ",";
+    body += "{\"ts\":" + std::to_string(static_cast<long long>(batch[i].t_ms / 1000)) + ",\"t_ms\":" +
+            std::to_string(static_cast<long long>(batch[i].t_ms)) + ",\"seq\":" + std::to_string(++g_csi_seq) +
+            ",\"rssi\":" + std::to_string(batch[i].rssi) + ",\"nf\":" + std::to_string(batch[i].noise) +
+            ",\"ch\":" + std::to_string(batch[i].ch) + ",\"iq\":\"" + std::string(reinterpret_cast<char *>(b64), ol) + "\"}";
+  }
+  body += "]}";
+  if (g_csi_client == nullptr) {
+    static std::string target = url("/csi");
+    esp_http_client_config_t cfg = {};
+    cfg.url = target.c_str();
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = kHttpTimeoutMs;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.keep_alive_enable = true;
+    cfg.event_handler = collect_body;
+    cfg.user_data = &g_csi_response;
+    g_csi_client = esp_http_client_init(&cfg);
+    if (g_csi_client == nullptr) return;
+    esp_http_client_set_header(g_csi_client, "Content-Type", "application/json");
+  }
+  g_csi_response.clear();
+  esp_http_client_set_post_field(g_csi_client, body.data(), static_cast<int>(body.size()));
+  int status = -1;
+  if (esp_http_client_perform(g_csi_client) == ESP_OK) {
+    status = esp_http_client_get_status_code(g_csi_client);
+  } else {
+    esp_http_client_cleanup(g_csi_client);
+    g_csi_client = nullptr;
+  }
+  if (status == 409) g_csi_session.store(0);  // session over on the server
+  if (status < 200 || status >= 300) ESP_LOGW(TAG, "csi upload %d frames: %d", n, status);
+}
+
 // Send up to kBatch buffered windows. True if the buffer was (partly) drained
 // or empty; false on a transport/server error (keep the windows).
 constexpr size_t kTelBatch = 30;
 bool flush_telemetry() {
-  TelemetryWindow batch[kTelBatch];
+  static TelemetryWindow batch[kTelBatch];  // client task only; keeps the 8 KB stack free
   size_t n = 0;
   uint32_t dropped;
   {
@@ -245,12 +410,11 @@ bool flush_telemetry() {
             ",\"mvmt_avg\":" + fmt_float(w.mvmt_avg) + ",\"mvmt_max\":" + fmt_float(w.mvmt_max) +
             ",\"motion_ratio\":" + fmt_float(w.motion_ratio) + ",\"thr\":" + fmt_float(w.thr) +
             ",\"rssi\":" + std::to_string(w.rssi) + ",\"state\":\"" + w.state + "\"" +
-            ",\"ext\":{\"v\":1,\"std\":" + fmt_float(w.mvmt_std) + ",\"min\":" + fmt_float(w.mvmt_min) +
-            ",\"ch\":" + std::to_string(w.channel) + "}}";
+            ",\"ext\":" + ext_json(w) + "}";
   }
   body += "]}";
   const int status = post_telemetry(body);
-  if (status >= 200 && status < 300) apply_mode_from_response(g_tel_response);
+  if (status >= 200 && status < 300) { apply_mode_from_response(g_tel_response); apply_capture_from_response(g_tel_response); }
   if ((status >= 200 && status < 300) || (status >= 400 && status < 500 && status != 429)) {
     if (status >= 400) ESP_LOGW(TAG, "telemetry rejected: %d", status);
     std::lock_guard<std::mutex> lock(g_tel_mutex);
@@ -343,6 +507,13 @@ void client_task(void *) {
     if (static_cast<int32_t>(now - next_telemetry) >= 0) {
       next_telemetry = now + (flush_telemetry() ? CONFIG_HIDECARE_TELEMETRY_SEC * 1000U : 5000U);
     }
+    {
+      static uint32_t next_csi = 0;
+      if (g_csi_session.load() != 0 && static_cast<int32_t>(now - next_csi) >= 0) {
+        next_csi = now + 1000;
+        flush_csi();
+      }
+    }
     if (!pending_valid && xQueueReceive(g_queue, &pending, pdMS_TO_TICKS(200)) == pdTRUE) {
       if (!time_valid(pending.timestamp)) pending.timestamp = 0;
       pending_valid = true;
@@ -395,10 +566,13 @@ bool start() {
   ESP_LOGI(TAG, "device_code=%s mac=%s server=%s", device_code().c_str(), g_mac.c_str(), CONFIG_HIDECARE_SERVER_URL);
   g_queue = xQueueCreate(16, sizeof(QueuedEvent));
   if (g_queue == nullptr) return false;
+  espectre::set_csi_tap(csi_tap);
   return xTaskCreate(client_task, "hidecare", 8192, nullptr, 3, nullptr) == pdPASS;
 }
 
 bool baby_sleep_mode() { return g_baby_sleep.load(); }
+
+void set_diag(const Diag &d) { g_diag = d; }
 
 // Debounce (normal mode only): a motion event within DEBOUNCE_SEC of the last
 // one is dropped, and so is the no_motion that would close it, so the server
@@ -431,6 +605,7 @@ void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state,
   if (mvmt > g_acc.max) g_acc.max = mvmt;
   if (g_acc.n == 1 || mvmt < g_acc.min) g_acc.min = mvmt;
   if (channel) g_acc.channel = channel;
+  if (g_acc.n <= 64) g_acc.vals[g_acc.n - 1] = mvmt;
   if (motion) g_acc.n_motion++;
   g_acc.thr = thr;
   if (rssi != INT8_MIN) g_acc.rssi = rssi;
@@ -452,6 +627,25 @@ void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state,
   }
   w.mvmt_min = g_acc.min;
   w.channel = g_acc.channel;
+  {
+    const uint32_t m = g_acc.n < 64 ? g_acc.n : 64;
+    const uint32_t k = (m * 9) / 10 < m ? (m * 9) / 10 : m - 1;
+    std::nth_element(g_acc.vals, g_acc.vals + k, g_acc.vals + m);
+    w.mvmt_p90 = g_acc.vals[k];
+  }
+  w.diag = g_diag;
+  {
+    BandAcc b;
+    portENTER_CRITICAL(&g_band_mux);
+    b = g_band_acc;
+    g_band_acc = BandAcc{};
+    portEXIT_CRITICAL(&g_band_mux);
+    w.has_bands = b.n >= 2;
+    for (int i = 0; i < kBands && w.has_bands; i++) {
+      const float mean = b.sum[i] / b.n;
+      w.bands[i] = q_var(b.sumsq[i] / b.n - mean * mean);
+    }
+  }
   g_acc.n = g_acc.n_motion = 0;
   g_acc.sum = g_acc.sumsq = 0;
   g_acc.max = 0;
@@ -473,6 +667,7 @@ bool server_ok() { return false; }
 bool start() { return true; }
 void notify_motion(bool) {}
 void add_sample(float, float, bool, int, const char *, uint8_t) {}
+void set_diag(const Diag &) {}
 bool baby_sleep_mode() { return false; }
 }  // namespace hidecare
 

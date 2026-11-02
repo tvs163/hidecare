@@ -27,6 +27,8 @@
 #include "ota_service_https.h"
 #include "primary_console.h"
 #include "hidecare_client.h"
+#include "runtime/runtime_diagnostics.h"
+#include <cstring>
 #include "hidecare_led.h"
 #include "hidecare_setup.h"
 
@@ -337,6 +339,14 @@ void espectre_loop_task(void *arg) {
         const char *state = snap.calibrating ? "calibrating"
                             : !snap.ready_to_publish ? "not_ready"
                             : motion ? "motion" : "idle";
+        hidecare::Diag dg;
+        if (const espectre::RuntimeDiagnosticsSample *ds = g_frontend->diagnostics_sample()) {
+          dg.valid = true;
+          dg.occ = ds->csi_occupancy_ratio; dg.cb = ds->csi_callback_pps; dg.acc = ds->csi_accepted_pps;
+          dg.hwerr = ds->csi_hw_error_pps; dg.gen = ds->generator_pps; dg.rx = ds->traffic_rx_pps;
+        }
+        strlcpy(dg.det, snap.detector_name ? snap.detector_name : "unknown", sizeof(dg.det));
+        hidecare::set_diag(dg);
         hidecare::add_sample(snap.movement_metric, snap.threshold, motion, snap.link_rssi_dbm, state, snap.link_channel);
       }
       g_frontend->hold_pending_traffic_restart(g_wifi_manager.has_deferred_radio_work());
