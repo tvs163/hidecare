@@ -63,3 +63,30 @@ Redistributors that package the Python environment must reproduce its installed 
 ## Trademarks, media, and external links
 
 Third-party product names, logos, article thumbnails, video thumbnails, screenshots, and linked media remain the property of their respective owners. ESPectre's GPL or commercial software license does not grant trademark, certification, publicity, or media-reuse rights in that material. In particular, use of Matter trademarks and claims of Matter certification require authorization from the Connectivity Standards Alliance.
+
+## RuView (MIT)
+
+`vitals_core.c` adapts DSP routines from RuView (https://github.com/ruvnet/RuView).
+
+```
+MIT License
+
+Copyright (c) 2024 rUv
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.```

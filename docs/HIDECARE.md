@@ -140,3 +140,16 @@ idf.py -B build-s3 -DSDKCONFIG=build-s3/sdkconfig -p /dev/ttyUSB0 flash monitor
 - Пока плата в режиме настройки пытается подключиться к сохранённой сети, сканирование списка сетей может занять больше времени.
 - BLE (NimBLE) включён только для ESP32-S3 (`sdkconfig.defaults.esp32s3`).
 - Версия прошивки берётся из `src/cpp/frontend/native/app/HIDECARE_VERSION`.
+
+## 3.5.0-dev: vitals (feature/vitals)
+
+`main/vitals_core.c` (portable DSP, host tests in `test/vitals`) + `main/vitals.cpp` (ESP glue).
+Runs next to the ESPectre detector via the non-consuming CSI tap; detector input is unchanged.
+Pipeline: sanitize (null/saturated bins) -> phase -> linear de-slope across subcarriers (CFO/STO)
+-> unwrap in time -> Welford variance, top-8 bins -> decimate to ~10 Hz -> biquad 0.1-0.5 Hz / 0.8-2 Hz
+-> breathing (zero-crossing, autocorr confidence), HR (autocorr, breathing-harmonic rejection, median 13);
+fall_phase = phase acceleration on the raw stream (3 frames, 5 s cooldown).
+Telemetry `ext.v=3` adds: vit, fs, vrej, vdrop, ping, fall_phase, br_bpm/br_conf, hr_bpm/hr_conf (only when conf>0).
+Runtime toggles in the /telemetry reply: `"vitals":{"en":0|1,"hr":0|1,"san":0|1,"fall":<rad>,"ping":<Hz 0..100>}`.
+Self-ping to the gateway is compiled in but off (0 Hz) until the server asks.
+Host tests: `cc -Isrc/cpp/frontend/native/app/main test/vitals/test_vitals_core.c src/cpp/frontend/native/app/main/vitals_core.c -lm && ./a.out`

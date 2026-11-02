@@ -32,6 +32,7 @@
 
 #include "frontend_firmware_version.h"
 #include "runtime/esp_idf/csi_tap.h"
+#include "vitals.h"
 #include <mbedtls/base64.h>
 
 #if CONFIG_HIDECARE_ENABLED
@@ -72,6 +73,9 @@ std::atomic<long long> g_csi_until{0};  // epoch seconds
 
 void csi_tap(const int8_t *iq, uint16_t len, int8_t rssi, int8_t noise, uint8_t ch) {
   if (len < 128) return;
+#if CONFIG_HIDECARE_VITALS_ENABLED
+  vitals::feed(iq, len);
+#endif
   float amp[kBands];
   for (int b = 0; b < kBands; b++) {
     float a = 0;
@@ -120,6 +124,8 @@ struct TelemetryWindow {
   Diag diag;
   bool has_bands;
   uint8_t bands[kBands];
+  bool has_vitals;     // ext v3
+  vitals::Snapshot vit;
 };
 
 // Ring buffer of finished windows, guarded by g_tel_mutex.
@@ -282,7 +288,7 @@ std::string fmt_float(float v) {
 }
 
 std::string ext_json(const TelemetryWindow &w) {
-  std::string e = "{\"v\":2,\"std\":" + fmt_float(w.mvmt_std) + ",\"min\":" + fmt_float(w.mvmt_min) +
+  std::string e = std::string("{\"v\":") + (w.has_vitals ? "3" : "2") + ",\"std\":" + fmt_float(w.mvmt_std) + ",\"min\":" + fmt_float(w.mvmt_min) +
                   ",\"p90\":" + fmt_float(w.mvmt_p90) + ",\"ch\":" + std::to_string(w.channel);
   if (w.diag.valid) {
     e += ",\"occ\":" + fmt_float(w.diag.occ) + ",\"cb\":" + fmt_float(w.diag.cb) + ",\"acc\":" + fmt_float(w.diag.acc) +
@@ -293,6 +299,14 @@ std::string ext_json(const TelemetryWindow &w) {
     char hex[kBands * 2 + 1];
     for (int i = 0; i < kBands; i++) snprintf(hex + i * 2, 3, "%02x", w.bands[i]);
     e += ",\"bands\":\"" + std::string(hex) + "\"";
+  }
+  if (w.has_vitals) {
+    const vitals::Snapshot &v = w.vit;
+    e += ",\"vit\":" + std::string(v.enabled ? "1" : "0") + ",\"fs\":" + fmt_float(v.fs_hz) +
+         ",\"vrej\":" + std::to_string(v.rejected) + ",\"vdrop\":" + std::to_string(v.dropped) +
+         ",\"ping\":" + std::to_string(v.ping_hz) + ",\"fall_phase\":" + (v.fall_phase ? "1" : "0");
+    if (v.br_conf > 0) e += ",\"br_bpm\":" + fmt_float(v.br_bpm) + ",\"br_conf\":" + fmt_float(v.br_conf);
+    if (v.hr_conf > 0) e += ",\"hr_bpm\":" + fmt_float(v.hr_bpm) + ",\"hr_conf\":" + fmt_float(v.hr_conf);
   }
   return e + "}";
 }
@@ -414,7 +428,11 @@ bool flush_telemetry() {
   }
   body += "]}";
   const int status = post_telemetry(body);
-  if (status >= 200 && status < 300) { apply_mode_from_response(g_tel_response); apply_capture_from_response(g_tel_response); }
+  if (status >= 200 && status < 300) { apply_mode_from_response(g_tel_response); apply_capture_from_response(g_tel_response);
+#if CONFIG_HIDECARE_VITALS_ENABLED
+    vitals::apply_config_json(g_tel_response);
+#endif
+  }
   if ((status >= 200 && status < 300) || (status >= 400 && status < 500 && status != 429)) {
     if (status >= 400) ESP_LOGW(TAG, "telemetry rejected: %d", status);
     std::lock_guard<std::mutex> lock(g_tel_mutex);
@@ -567,6 +585,9 @@ bool start() {
   g_queue = xQueueCreate(16, sizeof(QueuedEvent));
   if (g_queue == nullptr) return false;
   espectre::set_csi_tap(csi_tap);
+#if CONFIG_HIDECARE_VITALS_ENABLED
+  if (!vitals::start()) ESP_LOGW(TAG, "vitals task not started");
+#endif
   return xTaskCreate(client_task, "hidecare", 8192, nullptr, 3, nullptr) == pdPASS;
 }
 
@@ -646,6 +667,10 @@ void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state,
       w.bands[i] = q_var(b.sumsq[i] / b.n - mean * mean);
     }
   }
+#if CONFIG_HIDECARE_VITALS_ENABLED
+  w.vit = vitals::take();
+  w.has_vitals = true;
+#endif
   g_acc.n = g_acc.n_motion = 0;
   g_acc.sum = g_acc.sumsq = 0;
   g_acc.max = 0;

@@ -6,6 +6,8 @@ idf_component_register(
         "hidecare_ble.cpp"
         "hidecare_led.cpp"
         "hidecare_dns_fallback.c"
+        "vitals.cpp"
+        "vitals_core.c"
     INCLUDE_DIRS
         "."
         "../../espectre"

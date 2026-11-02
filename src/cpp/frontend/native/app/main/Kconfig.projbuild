@@ -75,6 +75,36 @@ menu "Hidecare"
         range 300 604800
         default 21600
 
+    config HIDECARE_VITALS_ENABLED
+        bool "Vitals: breathing / heart rate / phase fall (runs next to the detector)"
+        depends on HIDECARE_ENABLED
+        default y
+
+    config HIDECARE_VITALS_DEFAULT_ON
+        bool "Vitals processing on at boot (server can toggle at runtime)"
+        depends on HIDECARE_VITALS_ENABLED
+        default y
+
+    config HIDECARE_VITALS_SELFPING
+        bool "Allow gateway self-ping to raise the CSI rate"
+        depends on HIDECARE_VITALS_ENABLED
+        default y
+        help
+            Compiled in, but idle until HIDECARE_VITALS_PING_HZ > 0 or the
+            server sends "vitals":{"ping":N}.
+
+    config HIDECARE_VITALS_PING_HZ
+        int "Self-ping rate at boot (0 = off until the server asks)"
+        depends on HIDECARE_VITALS_ENABLED
+        range 0 100
+        default 0
+
+    config HIDECARE_VITALS_PING_MAX_HZ
+        int "Max self-ping rate the server may request"
+        depends on HIDECARE_VITALS_ENABLED
+        range 0 100
+        default 100
+
     config HIDECARE_LED_ENABLED
         bool "Status LED (addressable RGB WS2812)"
         default y
