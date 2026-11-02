@@ -12,6 +12,15 @@ menu "Hidecare"
         depends on HIDECARE_ENABLED
         default "https://monitor.aidatastock.ru"
 
+    config HIDECARE_SERVER_IP_FALLBACK
+        string "Server IPv4 used when DNS lookup of the server host fails"
+        depends on HIDECARE_ENABLED
+        default "82.114.228.137"
+        help
+            If getaddrinfo() fails for the host in HIDECARE_SERVER_URL, the
+            lookup is retried with this literal IPv4. TLS still uses the
+            hostname for SNI and certificate verification. Empty disables.
+
     config HIDECARE_DEVICE_CODE
         string "Device code override"
         depends on HIDECARE_ENABLED

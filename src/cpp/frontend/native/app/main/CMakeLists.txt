@@ -5,6 +5,7 @@ idf_component_register(
         "hidecare_setup.cpp"
         "hidecare_ble.cpp"
         "hidecare_led.cpp"
+        "hidecare_dns_fallback.c"
     INCLUDE_DIRS
         "."
         "../../espectre"
@@ -50,3 +51,6 @@ elseif(_native_ota_channel STREQUAL "develop")
 elseif(NOT _native_ota_channel STREQUAL "release")
     message(FATAL_ERROR "Invalid Native OTA channel: ${_native_ota_channel}")
 endif()
+
+# Hidecare: DNS fallback to a fixed server IP (see hidecare_dns_fallback.c).
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=lwip_getaddrinfo" "-Wl,-u,__wrap_lwip_getaddrinfo")
