@@ -327,6 +327,18 @@ void espectre_loop_task(void *arg) {
     }
 #endif
     if (g_frontend != nullptr) {
+      // Hidecare telemetry: sample the runtime snapshot at 10 Hz.
+      static uint32_t next_sample_ms = 0;
+      const uint32_t t_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+      if (static_cast<int32_t>(t_ms - next_sample_ms) >= 0) {
+        next_sample_ms = t_ms + 100;
+        const espectre::RuntimeSnapshot &snap = g_frontend->snapshot();
+        const bool motion = snap.motion_state == espectre::MotionState::MOTION;
+        const char *state = snap.calibrating ? "calibrating"
+                            : !snap.ready_to_publish ? "not_ready"
+                            : motion ? "motion" : "idle";
+        hidecare::add_sample(snap.movement_metric, snap.threshold, motion, snap.link_rssi_dbm, state);
+      }
       g_frontend->hold_pending_traffic_restart(g_wifi_manager.has_deferred_radio_work());
       g_frontend->loop();
     }

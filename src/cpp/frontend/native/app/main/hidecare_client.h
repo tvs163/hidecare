@@ -26,6 +26,17 @@ bool server_ok();
 /** Start the background task. Call once after Wi-Fi is started. */
 bool start();
 
+/**
+ * Feed one sensing sample (call ~10 Hz from the frontend loop). The client
+ * folds samples into CONFIG_HIDECARE_TELEMETRY_SEC windows and POSTs them to
+ * /telemetry, buffering windows while offline. state: "idle", "motion",
+ * "calibrating" or "not_ready".
+ */
+void add_sample(float mvmt, float thr, bool motion, int rssi, const char *state);
+
+/** Server-assigned mode: true when "baby_sleep" (no motion debounce). */
+bool baby_sleep_mode();
+
 /** Queue a motion (true) or no_motion (false) event. Never blocks. */
 void notify_motion(bool motion);
 

@@ -39,6 +39,26 @@ menu "Hidecare"
         range 30 86400
         default 300
 
+    config HIDECARE_TELEMETRY_SEC
+        int "Telemetry window (s): one summary POST /telemetry per window"
+        depends on HIDECARE_ENABLED
+        range 1 5
+        default 2
+
+    config HIDECARE_TELEMETRY_QUEUE
+        int "Telemetry windows kept while offline (ring buffer)"
+        depends on HIDECARE_ENABLED
+        range 8 600
+        default 150
+
+    config HIDECARE_MOTION_DEBOUNCE_SEC
+        int "Normal mode: minimum seconds between motion events"
+        depends on HIDECARE_ENABLED
+        range 0 3600
+        default 30
+        help
+            In mode baby_sleep (set by the server) motion events go out at once.
+
     config HIDECARE_OTA_ENABLED
         bool "Automatically check the Hidecare server for firmware updates"
         depends on HIDECARE_ENABLED
